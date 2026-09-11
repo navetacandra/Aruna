@@ -326,6 +326,10 @@ class AgentLoop:
                             save_message(self.session_id, {"role": "tool", "tool_call_id": tid, "name": fname, "content": output})
                             continue
                     output = execute_tool(fname, fargs)
+                    # Show bash output directly (truncated preview)
+                    if fname == "bash":
+                        preview = output[:3000] + ("...[truncated]" if len(output) > 3000 else "")
+                        self._log(f"[bash output]\n{preview}")
                     # Save to cache for deduplication (full)
                     self._tool_cache[cache_key] = output
                     from agent_core.config import MAX_TOOL_OUTPUT_CHARS
