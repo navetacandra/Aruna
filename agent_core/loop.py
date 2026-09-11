@@ -42,6 +42,9 @@ class AgentLoop:
         """Satu turn: user_input -> loop hingga selesai -> return final answer."""
         self.context.add_user(user_input)
         save_message(self.session_id, {"role": "user", "content": user_input})
+        # helper untuk ambil think saat ini
+        def _current_think():
+            return self.extra_body.get("reasoning_effort") if self.extra_body else "none"
 
         final_answer = ""
 
@@ -70,7 +73,7 @@ class AgentLoop:
                 err = f"[LLM error iter {iteration}: {e}]"
                 print(f"\n{err}", file=sys.stderr)
                 self.context.add_assistant(err)
-                save_message(self.session_id, {"role": "assistant", "content": err})
+                save_message(self.session_id, {"role": "assistant", "content": err, "model": self.llm.model, "think_variant": _current_think()})
                 return err
 
             content = result.get("content") or ""
@@ -91,13 +94,13 @@ class AgentLoop:
                 if not stream and content:
                     print(content)
                 self.context.add_assistant(content)
-                save_message(self.session_id, {"role": "assistant", "content": content})
+                save_message(self.session_id, {"role": "assistant", "content": content, "model": self.llm.model, "think_variant": _current_think()})
                 final_answer = content
                 break
             else:
-                # Ada tool calls: simpan assistant message + eksekusi tools
+                # Ada tool calls: simpan assistant message + eksekusi tools (sertakan model & think)
                 self.context.add_assistant(content, tool_calls)
-                save_message(self.session_id, {"role": "assistant", "content": content, "tool_calls": tool_calls})
+                save_message(self.session_id, {"role": "assistant", "content": content, "tool_calls": tool_calls, "model": self.llm.model, "think_variant": _current_think()})
 
                 # Tampilkan tool calls ke stderr agar user tahu
                 for tc in tool_calls:
@@ -159,7 +162,7 @@ class AgentLoop:
             if not final_answer:
                 final_answer = "[Agent stopped: max iterations reached without final answer]"
                 self.context.add_assistant(final_answer)
-                save_message(self.session_id, {"role": "assistant", "content": final_answer})
+                save_message(self.session_id, {"role": "assistant", "content": final_answer, "model": self.llm.model, "think_variant": _current_think()})
 
         return final_answer
 

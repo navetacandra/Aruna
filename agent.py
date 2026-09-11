@@ -31,7 +31,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).parent))
 
 from agent_core.config import DEFAULT_MODEL, HISTS_DIR
 from agent_core.context import ContextManager
-from agent_core.history import generate_session_id, list_sessions, load_messages
+from agent_core.history import generate_session_id, list_sessions, load_messages, get_last_model_and_think
 from agent_core.llm import LLMClient, fetch_models, is_responses_model
 from agent_core.loop import AgentLoop
 from agent_core.prompts import build_system_prompt
@@ -95,26 +95,29 @@ def handle_compact(ctx: ContextManager):
         preview = ctx.messages[1].get("content","")[:500].replace("\n"," ")
         print(f"  summary preview: {preview}...", file=sys.stderr)
 
-def handle_model(arg: str, llm: LLMClient, base_url=None):
-    """arg bisa kosong (interactive), atau nama model langsung."""
+def handle_model(arg: str, llm: LLMClient, base_url=None, loop=None, think_variant: str = "none"):
+    """arg bisa kosong (interactive), atau nama model langsung. Return think_variant baru (mungkin dimatikan jika model tidak support)."""
     arg = arg.strip() if arg else ""
     if arg:
-        # langsung set
         llm.model = arg
         print(f"[model] switched to {arg}", file=sys.stderr)
-        # info thinking support
         if is_responses_model(arg):
             print(f"  -> model mendukung thinking (reasoning_effort)", file=sys.stderr)
         else:
             print(f"  -> model tidak mendukung thinking (akan tampil None)", file=sys.stderr)
-        return
+            if loop is not None and think_variant != "none":
+                print(f"  -> thinking {think_variant} dimatikan karena model tidak support", file=sys.stderr)
+                loop.extra_body.pop("reasoning_effort", None)
+                loop.extra_body.pop("reasoning", None)
+                think_variant = "none"
+        return think_variant
     # interactive: fetch & pilih
     print("Fetching models...", file=sys.stderr)
     try:
         models = fetch_models(base_url=base_url) if base_url else fetch_models()
     except Exception as e:
         print(f"Error fetch models: {e}", file=sys.stderr)
-        return
+        return think_variant
     # tampilkan SEMUA models agar pengguna dapat memilih
     display = models
     print(f"Found {len(models)} models (menampilkan semua):", file=sys.stderr)
@@ -126,10 +129,10 @@ def handle_model(arg: str, llm: LLMClient, base_url=None):
         choice = input().strip()
     except (EOFError, KeyboardInterrupt):
         print("\n[model] batal", file=sys.stderr)
-        return
+        return think_variant
     if not choice:
         print("[model] batal", file=sys.stderr)
-        return
+        return think_variant
     # coba parse angka
     sel = None
     if choice.isdigit():
@@ -138,7 +141,7 @@ def handle_model(arg: str, llm: LLMClient, base_url=None):
             sel = display[idx-1].get("id")
         else:
             print(f"[model] nomor di luar range 1-{len(display)}", file=sys.stderr)
-            return
+            return think_variant
     else:
         # cek apakah nama ada di models
         sel = choice
@@ -148,6 +151,16 @@ def handle_model(arg: str, llm: LLMClient, base_url=None):
             print(f"[model] warning: '{choice}' tidak ada di daftar, tetap gunakan (custom)", file=sys.stderr)
     llm.model = sel
     print(f"[model] switched to {sel}", file=sys.stderr)
+    if is_responses_model(sel):
+        print(f"  -> model mendukung thinking (reasoning_effort)", file=sys.stderr)
+    else:
+        print(f"  -> model tidak mendukung thinking (akan tampil None)", file=sys.stderr)
+        if loop is not None and think_variant != "none":
+            print(f"  -> thinking {think_variant} dimatikan karena model tidak support", file=sys.stderr)
+            loop.extra_body.pop("reasoning_effort", None)
+            loop.extra_body.pop("reasoning", None)
+            think_variant = "none"
+    return think_variant
 
 def handle_usage(ctx: ContextManager):
     u = ctx.token_usage()
@@ -309,14 +322,31 @@ def main():
     # Permission manager
     pm = PermissionManager(mode=args.tool_call)
 
-    # Thinking variant
+    # Thinking variant - awal dari CLI
     think_variant = args.think.lower().strip() if args.think else DEFAULT_THINK
+    # Jika resume session, coba pakai model & think terakhir dari history (sesuai instruksi)
+    if args.session or args.cont:
+        try:
+            last_model, last_think = get_last_model_and_think(session_id)
+            if last_model:
+                if last_model != llm.model:
+                    print(f"[history] menggunakan model terakhir dari session: {last_model} (CLI: {llm.model})", file=sys.stderr)
+                    llm.model = last_model
+            if last_think:
+                # last_think dari history bisa "none" atau varian
+                if last_think != think_variant:
+                    # Jika CLI tidak eksplisit (args.think is None) atau history berbeda, pakai history sebagai sumber kebenaran terakhir
+                    # Karena history menyimpan yang benar-benar dipakai terakhir, kita prioritaskan history
+                    print(f"[history] menggunakan thinking terakhir: {last_think} (CLI: {think_variant})", file=sys.stderr)
+                    think_variant = last_think
+        except Exception as e:
+            print(f"[history] gagal load last model/think: {e}", file=sys.stderr)
+
     extra_body = {}
     if think_variant and think_variant != "none":
         if is_responses_model(llm.model):
             extra_body["reasoning_effort"] = think_variant
         else:
-            # tetap simpan tapi tidak efektif, akan diabaikan
             if think_variant != "none":
                 print(f"[warning] model {llm.model} tidak support thinking, variant '{think_variant}' diabaikan", file=sys.stderr)
                 think_variant = "none"
@@ -383,7 +413,7 @@ def main():
                 arg = stripped[7:].strip()  # len /models =7
             else:  # /model
                 arg = stripped[6:].strip()  # len /model =6
-            handle_model(arg, llm, base_url=args.base_url)
+            think_variant = handle_model(arg, llm, base_url=args.base_url, loop=loop, think_variant=think_variant)
             continue
 
         # /usage(s) /tokens

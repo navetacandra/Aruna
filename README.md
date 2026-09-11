@@ -23,7 +23,7 @@ Agent Python minimal tanpa external dependencies yang fokus pada **tool calling,
   - Iterative + emergency compaction jika masih >95%
   - Truncate tool output besar
 - **Skills**: `.agent/skills/<nama>/SKILL.md` (frontmatter `name/description`). Katalog disuntik ke system prompt, tool `skill_list`/`skill_load` lazy-load.
-- **History**: `.agent/hists/<session_id>.jsonl` JSONL per turn, `load_messages` untuk resume.
+- **History**: `.agent/hists/<session_id>.jsonl` JSONL per turn `{role,content,tool_calls,model,think_variant,ts}`, `load_messages` untuk resume (filter hanya `role/content` untuk LLM), `get_last_model_and_think()` untuk restore model & thinking terakhir saat `--session`/`--continue` (override CLI).
 - **Permission**: `agent_core/permissions.py:17` `PermissionManager` gate semua hardware tools (read/write/edit/glob/grep/bash) - mode `ask` prompt y/n/a/f, `accept-fs` fs auto, `accept-all` semua auto, `skill_list/load` selalu auto.
 - **Shell Escape**: `!` jalankan `subprocess.Popen` streaming & terminatable (Ctrl-C → `terminate()` → `kill()`).
 - **Thinking**: `/think` cek `is_responses_model()` - set `loop.extra_body["reasoning_effort"]` untuk muse-spark, `None` untuk model lain.

@@ -3,7 +3,7 @@ import json
 import pathlib
 import time
 import uuid
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from .config import HISTS_DIR
 
@@ -45,7 +45,7 @@ def load_history(session_id: str, hists_dir: str = None) -> List[Dict[str, Any]]
     return out
 
 def load_messages(session_id: str, hists_dir: str = None) -> List[Dict[str, Any]]:
-    """Kembalikan list messages (role/content/tool_calls) untuk resume context."""
+    """Kembalikan list messages (role/content/tool_calls) untuk resume context. History tetap OpenAI format, model/think disimpan terpisah dan tidak dimasukkan ke messages LLM."""
     if hists_dir is None:
         hists_dir = HISTS_DIR
     entries = load_history(session_id, hists_dir)
@@ -53,12 +53,38 @@ def load_messages(session_id: str, hists_dir: str = None) -> List[Dict[str, Any]
     for e in entries:
         # entry bisa berupa message langsung atau wrapper
         if "role" in e and "content" in e:
-            # filter ts etc
+            # filter ts etc, tapi pertahankan hanya field LLM (model/think tidak dikirim ke LLM, hanya metadata)
             m = {k: v for k, v in e.items() if k in ("role", "content", "tool_calls", "tool_call_id", "name")}
             msgs.append(m)
         elif "message" in e and isinstance(e["message"], dict):
             msgs.append(e["message"])
     return msgs
+
+def get_last_model_and_think(session_id: str, hists_dir: str = None) -> tuple[Optional[str], Optional[str]]:
+    """Ambil model dan thinking variant terakhir dari history. Returns (model, think) atau (None, None) jika tidak ada."""
+    if hists_dir is None:
+        hists_dir = HISTS_DIR
+    entries = load_history(session_id, hists_dir)
+    last_model = None
+    last_think = None
+    for e in entries:
+        # cari field model/think_variant atau model/thinking di entry
+        if "model" in e:
+            last_model = e.get("model")
+        if "think_variant" in e:
+            last_think = e.get("think_variant")
+        elif "thinking" in e:
+            last_think = e.get("thinking")
+        elif "think" in e:
+            last_think = e.get("think")
+        # juga cek di dalam message wrapper jika ada
+        if "message" in e and isinstance(e["message"], dict):
+            msg = e["message"]
+            if "model" in msg:
+                last_model = msg.get("model")
+            if "think_variant" in msg:
+                last_think = msg.get("think_variant")
+    return last_model, last_think
 
 def list_sessions(hists_dir: str = None) -> List[str]:
     if hists_dir is None:

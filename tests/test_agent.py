@@ -189,11 +189,12 @@ class TestHistory(unittest.TestCase):
 
 # Mock LLM untuk test AgentLoop tanpa network
 class MockLLM:
-    def __init__(self, responses):
+    def __init__(self, responses, model="mimo-v2.5-free"):
         # responses: list of dicts {content, tool_calls}
         self.responses = list(responses)
         self.calls = []
         self.extra_bodies = []
+        self.model = model
     def chat(self, messages, tools=None, stream=False, on_delta=None, on_tool_delta=None, extra_body=None, timeout=120):
         self.calls.append(messages)
         self.extra_bodies.append(extra_body)
@@ -886,6 +887,86 @@ class TestProviders(unittest.TestCase):
             prov_mod.PROVIDER_STATE_FILE = orig_state
             try: os.unlink(tmp.name)
             except: pass
+
+    def test_history_model_and_think(self):
+        from agent_core.history import generate_session_id, save_message, load_history, get_last_model_and_think
+        import agent_core.history as hist_mod
+        tmp = tempfile.TemporaryDirectory()
+        orig = hist_mod.HISTS_DIR
+        hist_mod.HISTS_DIR = tmp.name
+        try:
+            sid = generate_session_id()
+            save_message(sid, {"role":"user","content":"hi"})
+            save_message(sid, {"role":"assistant","content":"hello","model":"mimo-v2.5-free","think_variant":"medium"})
+            save_message(sid, {"role":"assistant","content":"hi2","model":"muse-spark-1.2-contributor-free","think_variant":"xhigh"})
+            last_model, last_think = get_last_model_and_think(sid)
+            self.assertEqual(last_model, "muse-spark-1.2-contributor-free")
+            self.assertEqual(last_think, "xhigh")
+            # cek load_messages tetap filter model
+            from agent_core.history import load_messages
+            msgs = load_messages(sid)
+            self.assertEqual(len(msgs), 3)
+            # raw history harus ada model
+            raw = load_history(sid)
+            self.assertEqual(raw[1].get("model"), "mimo-v2.5-free")
+            self.assertEqual(raw[1].get("think_variant"), "medium")
+        finally:
+            hist_mod.HISTS_DIR = orig
+            tmp.cleanup()
+
+    def test_loop_saves_model_think(self):
+        from agent_core.history import generate_session_id, load_history, get_last_model_and_think
+        import agent_core.history as hist_mod
+        tmp = tempfile.TemporaryDirectory()
+        orig = hist_mod.HISTS_DIR
+        hist_mod.HISTS_DIR = tmp.name
+        try:
+            sid = generate_session_id()
+            ctx = ContextManager(system_prompt="sys")
+            mock = MockLLM([{"content":"hello","tool_calls":None,"finish_reason":"stop"}], model="muse-spark-1.2-contributor-free")
+            loop = AgentLoop(llm=mock, context=ctx, session_id=sid, verbose=False, extra_body={"reasoning_effort":"high"})
+            loop.run("hi", stream=False)
+            raw = load_history(sid)
+            # cari assistant entry
+            assistant_entries = [r for r in raw if r.get("role")=="assistant"]
+            self.assertTrue(len(assistant_entries) > 0)
+            self.assertEqual(assistant_entries[-1].get("model"), "muse-spark-1.2-contributor-free")
+            self.assertEqual(assistant_entries[-1].get("think_variant"), "high")
+            last_model, last_think = get_last_model_and_think(sid)
+            self.assertEqual(last_model, "muse-spark-1.2-contributor-free")
+            self.assertEqual(last_think, "high")
+        finally:
+            hist_mod.HISTS_DIR = orig
+            tmp.cleanup()
+
+    def test_agent_loads_last_model(self):
+        from agent_core.history import generate_session_id, save_message, get_last_model_and_think
+        import agent_core.history as hist_mod
+        import agent_core.llm as llm_mod
+        tmp = tempfile.TemporaryDirectory()
+        orig = hist_mod.HISTS_DIR
+        hist_mod.HISTS_DIR = tmp.name
+        try:
+            sid = generate_session_id()
+            save_message(sid, {"role":"user","content":"hi"})
+            save_message(sid, {"role":"assistant","content":"hello","model":"muse-spark-1.2-contributor-free","think_variant":"xhigh"})
+            last_model, last_think = get_last_model_and_think(sid)
+            self.assertEqual(last_model, "muse-spark-1.2-contributor-free")
+            self.assertEqual(last_think, "xhigh")
+            # simulasi agent load: llm default mimo, tapi harus override ke history
+            llm = llm_mod.LLMClient(model="mimo-v2.5-free", session_id=sid)
+            think_variant = "none"
+            # mimic agent.py logic
+            lm, lt = get_last_model_and_think(sid)
+            if lm:
+                llm.model = lm
+            if lt:
+                think_variant = lt
+            self.assertEqual(llm.model, "muse-spark-1.2-contributor-free")
+            self.assertEqual(think_variant, "xhigh")
+        finally:
+            hist_mod.HISTS_DIR = orig
+            tmp.cleanup()
 
 
 if __name__ == "__main__":
