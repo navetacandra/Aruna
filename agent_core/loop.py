@@ -315,25 +315,19 @@ class AgentLoop:
                         allowed = self.permission_manager.check_or_prompt(fname, prompt_args)
                         if not allowed:
                             output = f"[DENIED] User denied execution of tool '{fname}' with args {prompt_args}. Inform the user that permission was denied and offer alternatives."
-                            # Smart truncate for lightweight history
                             from agent_core.config import MAX_TOOL_OUTPUT_CHARS
                             if len(output) > MAX_TOOL_OUTPUT_CHARS:
-                                head = int(MAX_TOOL_OUTPUT_CHARS * 0.6)
-                                tail = MAX_TOOL_OUTPUT_CHARS - head - 100
-                                output = output[:head] + f"\n...[SMART TRUNCATED {len(output)-MAX_TOOL_OUTPUT_CHARS} chars]...\n" + output[-tail:] if tail>0 else output[:MAX_TOOL_OUTPUT_CHARS]
+                                output = output[:MAX_TOOL_OUTPUT_CHARS] + f"\n...[TRUNCATED {len(output)-MAX_TOOL_OUTPUT_CHARS} chars]...\n"
                             self.context.add_tool_result(tid, fname, output)
                             save_message(self.session_id, {"role": "tool", "tool_call_id": tid, "name": fname, "content": output})
                             continue
                     output = execute_tool(fname, fargs)
                     # Save to cache for deduplication (full)
                     self._tool_cache[cache_key] = output
-                    # Smart truncate before saving - saves 50-70% tokens but keeps head+tail
                     from agent_core.config import MAX_TOOL_OUTPUT_CHARS
                     to_store = output
                     if len(output) > MAX_TOOL_OUTPUT_CHARS:
-                        head = int(MAX_TOOL_OUTPUT_CHARS * 0.6)
-                        tail = MAX_TOOL_OUTPUT_CHARS - head - 100
-                        to_store = output[:head] + f"\n...[SMART TRUNCATED {len(output)-MAX_TOOL_OUTPUT_CHARS} chars, saved {(1-MAX_TOOL_OUTPUT_CHARS/len(output))*100:.0f}%]...\n" + output[-tail:] if tail>0 else output[:MAX_TOOL_OUTPUT_CHARS]
+                        to_store = output[:MAX_TOOL_OUTPUT_CHARS] + f"\n...[TRUNCATED {len(output)-MAX_TOOL_OUTPUT_CHARS} chars]...\n"
                     self.context.add_tool_result(tid, fname, to_store)
                     save_message(self.session_id, {"role": "tool", "tool_call_id": tid, "name": fname, "content": to_store})
 

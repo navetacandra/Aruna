@@ -60,12 +60,8 @@ class ContextManager:
         self.messages.append(msg)
 
     def add_tool_result(self, tool_call_id: str, name: str, content: str):
-        # Smart truncate - saves 50-70% tokens while preserving important head+tail
         if len(content) > MAX_TOOL_OUTPUT_CHARS:
-            head = int(MAX_TOOL_OUTPUT_CHARS * 0.6)
-            tail = MAX_TOOL_OUTPUT_CHARS - head - 100
-            notice = f"\n...[SMART TRUNCATED {len(content)-MAX_TOOL_OUTPUT_CHARS} chars]...\n"
-            content = content[:head] + notice + content[-tail:] if tail > 0 else content[:MAX_TOOL_OUTPUT_CHARS]
+            content = content[:MAX_TOOL_OUTPUT_CHARS] + f"\n...[TRUNCATED {len(content)-MAX_TOOL_OUTPUT_CHARS} chars]...\n"
         self.messages.append({
             "role": "tool",
             "tool_call_id": tool_call_id,

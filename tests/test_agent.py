@@ -59,7 +59,6 @@ class TestContextManager(unittest.TestCase):
         self.assertEqual(len(msgs), 1 + 1 + 2)  # system + summary + 2 recent
 
     def test_truncate_tool_output(self):
-        # Smart truncate - save space but keep head+tail
         ctx = ContextManager(system_prompt="sys", max_tokens=100000)
         big = "a"* (MAX_TOOL_OUTPUT_CHARS + 5000)
         ctx.add_tool_result("call_1", "bash", big)

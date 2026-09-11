@@ -148,15 +148,9 @@ TOOL_DEFINITIONS: List[Dict[str, Any]] = [
 # ---------- Implementation ----------
 
 def _truncate(s: str, max_chars: int = MAX_TOOL_OUTPUT_CHARS) -> str:
-    # Smart truncate - save tokens but preserve important head + tail
     if len(s) <= max_chars:
         return s
-    # For long tool output, keep head + tail with notice in the middle
-    # Head 60% + tail 40% so header and file start (important parts) are preserved
-    head_len = int(max_chars * 0.6)
-    tail_len = max_chars - head_len - 100  # 100 for notice
-    notice = f"\n\n...[TRUNCATED smart {len(s)-max_chars} chars, total {len(s)} -> {max_chars} (saved {(1-max_chars/len(s))*100:.0f}%)]...\n\n"
-    return s[:head_len] + notice + s[-tail_len:] if tail_len > 0 else s[:max_chars] + notice
+    return s[:max_chars] + f"\n\n...[TRUNCATED {len(s)-max_chars} chars]...\n\n"
 
 def tool_read(filePath: str, offset: int = 1, limit: int = 2000) -> str:
     p = pathlib.Path(filePath)
