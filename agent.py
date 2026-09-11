@@ -16,6 +16,7 @@ Commands REPL:
   /reload                  reload state tanpa kehilangan konteks
   /think [variant]         lihat/pilih thinking variant (none/low/medium/high/xhigh)
   /tool-call [mode]        izin tool: accept-all, accept-fs, ask
+  /info                    tampilkan model, token, panjang chat
   !<command>               jalankan shell langsung (terminatable via Ctrl-C)
   /help, /clear, /session, /exit
 """
@@ -264,6 +265,16 @@ def handle_tool_call(arg: str, pm: PermissionManager):
     pm.set_mode(arg)
     print(f"[tool-call] mode -> {pm.status()}", file=sys.stderr)
 
+def handle_info(ctx: ContextManager, llm: LLMClient, think_variant: str):
+    u = ctx.token_usage()
+    total_msgs = len(ctx.messages)
+    # user_message_len: jumlah pesan user (atau total tanpa system)
+    user_msgs = sum(1 for m in ctx.messages if m.get("role") == "user")
+    # Format sesuai instruksi: Model: model_name [variant] / Token: {used}/{quota} {percent}% / Message: {user_message_len}
+    print(f"Model: {llm.model} [{think_variant}]", file=sys.stderr)
+    print(f"Token: {u['tokens']}/{u['max']} {u['percent']}%", file=sys.stderr)
+    print(f"Message: {user_msgs} (total {total_msgs}, system 1)", file=sys.stderr)
+
 def main():
     args = parse_args()
 
@@ -455,6 +466,11 @@ def main():
             handle_tool_call(arg, pm)
             continue
 
+        # /info
+        if low == "/info" or low.startswith("/info "):
+            handle_info(ctx, llm, think_variant)
+            continue
+
         # Legacy & helpers
         if stripped in ("/exit", "/quit", ":q"):
             print("[bye]", file=sys.stderr)
@@ -470,6 +486,7 @@ Commands:
   /reload                reload state tanpa kehilangan konteks
   /think [variant]       lihat/pilih thinking: none/low/medium/high/xhigh (None jika model tidak support)
   /tool-call [mode]      izin tool: accept-all, accept-fs, ask
+  /info                  tampilkan model, token, panjang chat
   !<command>             jalankan shell langsung (Ctrl-C untuk terminate)
   /clear                 bersihkan context (reset)
   /session               tampilkan session id
