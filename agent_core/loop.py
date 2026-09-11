@@ -111,16 +111,46 @@ class AgentLoop:
                 self.context.add_assistant(content, tool_calls)
                 save_message(self.session_id, {"role": "assistant", "content": content, "tool_calls": tool_calls, "model": self.llm.model, "think_variant": _current_think()})
 
-                # Tampilkan hanya apa yang dikerjakan: ">>>> {Type} {args}" tanpa hasil
+                # Tampilkan hanya apa yang dikerjakan sesuai spec (tanpa hasil)
                 for tc in tool_calls:
                     fname = tc["function"]["name"]
                     fargs = tc["function"]["arguments"]
-                    # fargs sudah JSON string, tampilkan apa adanya
-                    if isinstance(fargs, str):
-                        args_str = fargs
+                    try:
+                        parsed = json.loads(fargs) if isinstance(fargs, str) else fargs
+                        if not isinstance(parsed, dict):
+                            parsed = {}
+                    except:
+                        parsed = {}
+                    # Format per spec
+                    if fname in ("read", "write", "edit"):
+                        # fs: ">>>> {type} {filepath}"
+                        fp = parsed.get("filePath") or parsed.get("filepath") or ""
+                        self._log(f">>>> {fname} {fp}".strip())
+                    elif fname == "bash":
+                        # bash/command: ">>>> exec {command}"
+                        cmd = parsed.get("command", "")
+                        self._log(f">>>> exec {cmd}".strip())
+                    elif fname == "skill_list":
+                        self._log(">>>> fetch-skills")
+                    elif fname == "skill_load":
+                        name = parsed.get("name", "")
+                        self._log(f">>>> load-skill [{name}]" if name else ">>>> load-skill")
+                    elif fname == "grep":
+                        pat = parsed.get("pattern", "")
+                        p = parsed.get("path", "") or parsed.get("include", "")
+                        # grep: ">>>> grep {pattern} {path}"
+                        self._log(f">>>> grep {pat} {p}".strip())
+                    elif fname == "glob":
+                        pat = parsed.get("pattern", "")
+                        p = parsed.get("path", "")
+                        self._log(f">>>> glob {pat} {p}".strip() if p else f">>>> glob {pat}".strip())
                     else:
-                        args_str = json.dumps(fargs, ensure_ascii=False)
-                    self._log(f">>>> {fname} {args_str}")
+                        # fallback generic
+                        if isinstance(fargs, str):
+                            args_str = fargs
+                        else:
+                            args_str = json.dumps(fargs, ensure_ascii=False)
+                        self._log(f">>>> {fname} {args_str}")
 
                 # Eksekusi tiap tool sequential dengan permission check - Batalkan truncate, simpan full
                 for tc in tool_calls:
