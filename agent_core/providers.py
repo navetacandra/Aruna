@@ -1,6 +1,6 @@
-"""Provider abstraction untuk multi-SDK fallback - HANYA via opencode.ai/zen/v1.
+"""Provider abstraction for multi-SDK fallback - ONLY via opencode.ai/zen/v1.
 
-Mendukung 3 format sesuai SDK-example.md:
+Supports 3 formats per SDK-example.md:
 - openai_chat: POST {base}/zen/v1/chat/completions (OpenAI SDK chat)
   Request: {model, messages:[{role,content}], stream}
   Response: {choices:[{message:{role,content}, finish_reason}]}
@@ -16,9 +16,9 @@ Mendukung 3 format sesuai SDK-example.md:
   Response: {content:[{type:text,text}], stop_reason}
   SSE: event: message_start / content_block_start / content_block_delta / message_delta / message_stop
 
-History disimpan tetap format OpenAI (messages[] dengan role user/assistant/tool + tool_calls).
-Saat request, payload dikonversi sesuai SDK. State per-model disimpan di .agent/llm_provider_state.json.
-Fallback HANYA ke base opencode.ai/zen/v1, rubah state jika fallback terjadi.
+History is always stored in OpenAI format (messages[] with role user/assistant/tool + tool_calls).
+On request, payload is converted per SDK. Per-model state is stored in .agent/llm_provider_state.json.
+Fallback ONLY to base opencode.ai/zen/v1, update state if fallback occurs.
 """
 import json
 import os
@@ -177,19 +177,19 @@ def anthropic_response_to_openai(content_blocks: List[Dict[str, Any]], stop_reas
     return {"content": content, "tool_calls": tool_calls if tool_calls else None, "finish_reason": finish}
 
 def openai_messages_to_responses(messages: List[Dict[str, Any]]) -> Tuple[Optional[str], List[Dict[str, Any]]]:
-    """OpenAI messages -> (instructions, input) untuk Responses API sesuai SDK-example.md sec 2 & 5.
-    - system -> instructions (digabung)
+    """OpenAI messages -> (instructions, input) for Responses API per SDK-example.md sec 2 & 5.
+    - system -> instructions (joined)
     - user -> {role:user, content:[{type:input_text, text}]}
     - assistant -> {role:assistant, content:[{type:output_text, text}]}
-    - tool -> {role:user, content:[{type:input_text, text: tool result}] }  (fallback, karena spec tidak cover tools di responses, tapi kita normalisasi)
-    History eksplisit: seluruh conversation dikirim kembali di input, terbaru paling akhir.
+    - tool -> {role:user, content:[{type:input_text, text: tool result}] }  (fallback, since spec does not cover tools in responses, but we normalize it)
+    Explicit history: entire conversation is sent back in input, most recent last.
     """
     instructions_parts: List[str] = []
     inputs: List[Dict[str, Any]] = []
     for m in messages:
         role = m.get("role")
         content = m.get("content") or ""
-        # content bisa string, kita bungkus
+        # content may be a string, wrap it
         if role == "system":
             if isinstance(content, str):
                 instructions_parts.append(content)
@@ -204,13 +204,13 @@ def openai_messages_to_responses(messages: List[Dict[str, Any]]) -> Tuple[Option
             continue
         if role == "user":
             text = content if isinstance(content, str) else str(content)
-            # b.md: file input untuk Responses -> input_file / input_image
+            # b.md: file input for Responses -> input_file / input_image
             has_image = bool(VISION_IMAGE_RE.search(text)) if isinstance(text,str) else False
             has_file = bool(INPUT_FILE_RE.search(text)) if isinstance(text,str) else False
             if has_image or has_file:
                 # extract
                 clean_img, imgs = _extract_vision_images(text) if has_image else (text, [])
-                # setelah extract image, masih ada file marker?
+                # after extracting images, still has file marker?
                 clean, files = _extract_input_files(clean_img) if has_file else (clean_img, [])
                 parts: List[Dict[str, Any]] = []
                 if clean.strip():
@@ -218,8 +218,8 @@ def openai_messages_to_responses(messages: List[Dict[str, Any]]) -> Tuple[Option
                 for mime, b64 in imgs:
                     parts.append({"type": "input_image", "image_url": f"data:{mime};base64,{b64}", "detail": "auto"})
                 for fpath, mime, b64 in files:
-                    # b.md sec2: input_file dengan file_data (fallback upload 404)
-                    # pakai file_data data URL sesuai real test yang sukses
+                    # b.md sec2: input_file with file_data (fallback upload 404)
+                    # use file_data data URL per successful real test
                     fname = pathlib.Path(fpath).name if fpath else "file"
                     parts.append({"type": "input_file", "filename": fname, "file_data": f"data:{mime};base64,{b64}"})
                 if not parts:
@@ -230,33 +230,33 @@ def openai_messages_to_responses(messages: List[Dict[str, Any]]) -> Tuple[Option
             continue
         if role == "assistant":
             tool_calls = m.get("tool_calls")
-            # Jika tanpa tool, simple output_text
+            # If without tools, simple output_text
             if not tool_calls:
                 text = content if isinstance(content, str) else str(content)
-                # jika kosong, tetap kirim array kosong? tapi spec butuh text
+                # if empty, still send empty array? but spec requires text
                 if text.strip():
                     inputs.append({"role": "assistant", "content": [{"type": "output_text", "text": text}]})
                 else:
-                    # assistant kosong tanpa tool, tetap skip? tapi kita masukkan kosong untuk jaga turn
+                    # empty assistant without tools, still skip? but we insert empty to preserve turn
                     inputs.append({"role": "assistant", "content": [{"type": "output_text", "text": ""}]})
             else:
-                # ada tool_calls: kita representasikan sebagai assistant dengan output_text + function_call
-                # Di Responses API, function_call adalah type terpisah, tapi kita sederhanakan jadi output_text + tool info di content
-                # Untuk kompatibilitas, kita gabung text + tool_calls sebagai input_text json
-                # Namun untuk request, kita tetap kirim text biasa dan biarkan tools di payload terpisah
+                # has tool_calls: represent as assistant with output_text + function_call
+                # In Responses API, function_call is a separate type, but we simplify to output_text + tool info in content
+                # For compatibility, combine text + tool_calls as input_text json
+                # However for request, we still send plain text and let tools be in separate payload
                 text = content if isinstance(content, str) else ""
                 blocks = []
                 if text.strip():
                     blocks.append({"type": "output_text", "text": text})
-                # tool_calls di responses tidak dikirim via input, tapi via tools di payload, jadi kita tidak perlu embed di input
-                # Tapi kita tetap perlu merepresentasikan bahwa assistant pernah memanggil tool, jadi kita tambahkan placeholder
-                # Sederhananya: kirim assistant dengan text, tool result nanti sebagai user input_text
+                # tool_calls in responses are not sent via input, but via tools in payload, so no need to embed in input
+                # But we still need to represent that assistant previously called a tool, so add placeholder
+                # Simply: send assistant with text, tool result will be separate user input_text in next iteration (role tool)
                 inputs.append({"role": "assistant", "content": blocks if blocks else [{"type": "output_text", "text": ""}]})
-                # tool results akan dikirim sebagai user input_text terpisah di iterasi berikutnya (role tool)
-                # kita tidak embed tool_calls di input, karena Responses API handling tool via output
+                # tool results will be sent as separate user input_text in next iteration (role tool)
+                # we don't embed tool_calls in input, because Responses API handles tools via output
                 continue
         if role == "tool":
-            # tool result -> user input_text, support file input b.md
+            # tool result -> user input_text, supports file input b.md
             text = str(content)
             has_image = bool(VISION_IMAGE_RE.search(text))
             has_file = bool(INPUT_FILE_RE.search(text))
@@ -284,7 +284,7 @@ def openai_messages_to_responses(messages: List[Dict[str, Any]]) -> Tuple[Option
     return instructions, inputs
 
 def responses_output_to_openai(output: List[Dict[str, Any]]) -> Dict[str, Any]:
-    """Konversi Responses API output -> OpenAI {content, tool_calls}."""
+    """Convert Responses API output -> OpenAI {content, tool_calls}."""
     # output: [{type:message, role:assistant, content:[{type:output_text,text}]}]
     text_parts: List[str] = []
     tool_calls: List[Dict[str, Any]] = []
@@ -294,7 +294,7 @@ def responses_output_to_openai(output: List[Dict[str, Any]]) -> Dict[str, Any]:
                 if c.get("type") == "output_text":
                     text_parts.append(c.get("text",""))
                 elif c.get("type") == "function_call":
-                    # function_call di responses
+                    # function_call in responses
                     tool_calls.append({
                         "id": c.get("call_id") or c.get("id") or f"call_{uuid.uuid4().hex[:8]}",
                         "type": "function",
@@ -309,10 +309,10 @@ def responses_output_to_openai(output: List[Dict[str, Any]]) -> Dict[str, Any]:
     content = "".join(text_parts)
     return {"content": content, "tool_calls": tool_calls if tool_calls else None, "finish_reason": "tool_calls" if tool_calls else "stop"}
 
-# ---------- File input helpers (b.md - hanya Responses yang didukung untuk binary) ----------
+# ---------- File input helpers (b.md - only Responses is supported for binary) ----------
 VISION_IMAGE_RE = re.compile(r"\[\[VISION_IMAGE:(.+?)\]\]")
 INPUT_FILE_RE = re.compile(r"\[\[INPUT_FILE:(.+?)\]\]")
-# Generic binary marker (fallback) - jika ada binary tanpa marker spesifik, tetap deteksi via header
+# Generic binary marker (fallback) - if there is binary without specific marker, still detect via header
 BINARY_HEADER_RE = re.compile(r"\[Binary file:")
 
 def _get_mime_and_b64(path_str: str) -> Optional[Tuple[str, str]]:
@@ -362,11 +362,11 @@ def _extract_vision_images(text: str) -> Tuple[str, List[Tuple[str,str]]]:
     clean = VISION_IMAGE_RE.sub("", text)
     clean = re.sub(r"\n{3,}", "\n\n", clean).strip()
     if not clean and imgs:
-        clean = "Jelaskan gambar ini."
+        clean = "Describe this image."
     return clean, imgs
 
 def _extract_input_files(text: str) -> Tuple[str, List[Tuple[str,str,str]]]:
-    """Return (clean_text, [(path,mime,b64),...]) untuk INPUT_FILE"""
+    """Return (clean_text, [(path,mime,b64),...]) for INPUT_FILE"""
     if not text or not isinstance(text, str):
         return text or "", []
     matches = INPUT_FILE_RE.findall(text)
@@ -379,7 +379,7 @@ def _extract_input_files(text: str) -> Tuple[str, List[Tuple[str,str,str]]]:
     clean = INPUT_FILE_RE.sub("", text)
     clean = re.sub(r"\n{3,}", "\n\n", clean).strip()
     if not clean and files:
-        clean = "Ringkas dokumen ini."
+        clean = "Summarize this document."
     return clean, files
 
 # ---------- Provider definitions ----------
@@ -443,7 +443,7 @@ class ProviderSpec:
         return f"ProviderSpec({self.name} {self.url} sdk={self.sdk})"
 
 def build_candidate_providers(model: str, base_url: Optional[str] = None) -> List[ProviderSpec]:
-    """HANYA fallback ke opencode.ai/zen/v1 (sesuai instruksi)."""
+    """ONLY fallback to opencode.ai/zen/v1 (per instructions)."""
     saved = get_saved_provider(model)
     candidates: List[ProviderSpec] = []
     if saved:
@@ -452,7 +452,7 @@ def build_candidate_providers(model: str, base_url: Optional[str] = None) -> Lis
         except:
             pass
     opencode_base = (base_url or OPENCODE_BASE_URL).rstrip("/")
-    # endpoint sesuai SDK-example (semua di bawah /zen/v1)
+    # endpoints per SDK-example (all under /zen/v1)
     # OpenAI Chat: /zen/v1/chat/completions, Responses: /zen/v1/responses (plural), Anthropic: /zen/v1/messages
     if is_responses_model(model):
         candidates.append(ProviderSpec("opencode_responses", opencode_base, "/zen/v1/responses", "openai_responses"))
@@ -466,7 +466,7 @@ def build_candidate_providers(model: str, base_url: Optional[str] = None) -> Lis
         candidates.append(ProviderSpec("opencode_chat", opencode_base, "/zen/v1/chat/completions", "openai_chat"))
         candidates.append(ProviderSpec("opencode_responses", opencode_base, "/zen/v1/responses", "openai_responses"))
         candidates.append(ProviderSpec("opencode_anthropic", opencode_base, "/zen/v1/messages", "anthropic"))
-    # deduplikasi
+    # deduplicate
     seen = set()
     uniq: List[ProviderSpec] = []
     for c in candidates:
@@ -477,14 +477,14 @@ def build_candidate_providers(model: str, base_url: Optional[str] = None) -> Lis
     return uniq
 
 def get_headers_for_provider(provider: ProviderSpec, session_id: Optional[str] = None) -> Dict[str, str]:
-    # Semua fallback hanya ke opencode, jadi header selalu opencode
+    # All fallbacks only to opencode, so headers are always opencode
     return _opencode_headers(session_id)
 
 def prepare_payload_for_provider(provider: ProviderSpec, model: str, messages: List[Dict[str, Any]], tools: Optional[List[Dict[str, Any]]], extra_body: Optional[Dict[str, Any]], stream: bool) -> Dict[str, Any]:
-    """Konversi history OpenAI -> payload sesuai SDK-example. Tolak binary jika bukan Responses."""
+    """Convert OpenAI history -> payload per SDK-example. Reject binary if not Responses."""
     sdk = provider.sdk
-    # Jika ada binary file diembed dan bukan openai response -> Model tidak didukung (sesuai instruksi)
-    # Deteksi marker vision/input_file atau header binary - cek model dulu (hanya muse-spark yang boleh)
+    # If there is an embedded binary file and not openai response -> Model not supported (per instructions)
+    # Detect vision/input_file marker or binary header - check model first (only muse-spark is allowed)
     has_binary = False
     for m in messages:
         c = m.get("content")
@@ -496,11 +496,11 @@ def prepare_payload_for_provider(provider: ProviderSpec, model: str, messages: L
             if _has_binary_marker(s):
                 has_binary = True
                 break
-    # Cek model: hanya Responses yang boleh handle binary (sesuai b.md)
+    # Check model: only Responses may handle binary (per b.md)
     if has_binary and not is_responses_model(model):
-        raise ValueError("Model tidak didukung")
+        raise ValueError("Model not supported")
     if has_binary and sdk != "openai_responses":
-        raise ValueError("Model tidak didukung")
+        raise ValueError("Model not supported")
     if sdk == "openai_chat":
         # SDK-example sec 1: {model, messages:[{role,content}], stream}
         body: Dict[str, Any] = {"model": model, "messages": messages, "stream": stream}
@@ -517,7 +517,7 @@ def prepare_payload_for_provider(provider: ProviderSpec, model: str, messages: L
         if instructions:
             body["instructions"] = instructions
         if tools:
-            # Responses tools: flat {type:function, name, description, parameters} - tidak nested function
+            # Responses tools: flat {type:function, name, description, parameters} - not nested function
             flat_tools = []
             for t in tools:
                 if t.get("type") == "function" and "function" in t:
@@ -529,15 +529,15 @@ def prepare_payload_for_provider(provider: ProviderSpec, model: str, messages: L
                         "parameters": fn.get("parameters") or {"type": "object", "properties": {}}
                     })
                 elif "name" in t:
-                    # sudah flat
+                    # already flat
                     flat_tools.append(t)
                 else:
                     flat_tools.append(t)
             body["tools"] = flat_tools
             body["tool_choice"] = "auto"
         if extra_body:
-            # responses tidak pakai max_tokens tapi max_output_tokens
-            # mapping sudah ada di llm.py? tapi kita handle di sini
+            # responses does not use max_tokens but max_output_tokens
+            # mapping already in llm.py? but we handle it here
             for k, v in extra_body.items():
                 if k == "reasoning_effort":
                     body["reasoning"] = {"effort": str(v).lower().strip(), "summary": "auto"}
@@ -561,7 +561,7 @@ def prepare_payload_for_provider(provider: ProviderSpec, model: str, messages: L
             for k, v in extra_body.items():
                 if k not in ("reasoning_effort", "reasoning", "max_tokens", "max_output_tokens", "max_completion_tokens"):
                     body[k] = v
-                # reasoning_effort untuk anthropic tidak ada, ignore
+                # reasoning_effort for anthropic does not exist, ignore
         return body
     else:
         raise ValueError(f"Unknown sdk {sdk}")
@@ -576,14 +576,14 @@ def parse_nonstream_response(provider: ProviderSpec, resp_json: Dict[str, Any]) 
         if "output" in resp_json:
             try:
                 conv = responses_output_to_openai(resp_json.get("output", []))
-                # jika ada usage, ignore
+                # if there is usage, ignore
                 if conv["content"] or conv["tool_calls"]:
                     return conv
             except: pass
-            # fallback jika output kosong, coba parse lain
+            # fallback if output is empty, try other parsing
         if "output_text" in resp_json:
             return {"content": resp_json["output_text"], "tool_calls": None, "finish_reason": "stop"}
-        # fallback ke choices (jika opencode masih kirim choices untuk responses)
+        # fallback to choices (if opencode still sends choices for responses)
         msg = resp_json.get("choices", [{}])[0].get("message", {})
         if msg:
             return {"content": msg.get("content") or "", "tool_calls": msg.get("tool_calls"), "finish_reason": resp_json.get("choices", [{}])[0].get("finish_reason", "stop")}

@@ -1,4 +1,4 @@
-"""Tool definitions & implementations - filesystem kuat, tanpa external deps."""
+"""Tool definitions & implementations - robust filesystem, no external dependencies."""
 import fnmatch
 import glob as globmod
 import json
@@ -18,13 +18,13 @@ TOOL_DEFINITIONS: List[Dict[str, Any]] = [
         "type": "function",
         "function": {
             "name": "read",
-            "description": "Baca isi file. Gunakan untuk inspeksi kode, log, config. Support offset/limit untuk file besar.",
+            "description": "Read file contents. Use for inspecting code, logs, config. Supports offset/limit for large files.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "filePath": {"type": "string", "description": "Path absolut atau relatif ke file"},
-                    "offset": {"type": "integer", "description": "Baris mulai (1-indexed)", "default": 1},
-                    "limit": {"type": "integer", "description": "Jumlah baris maksimal, default 2000"}
+                    "filePath": {"type": "string", "description": "Absolute or relative path to file"},
+                    "offset": {"type": "integer", "description": "Starting line (1-indexed)", "default": 1},
+                    "limit": {"type": "integer", "description": "Maximum number of lines, default 2000"}
                 },
                 "required": ["filePath"],
                 "additionalProperties": False
@@ -35,12 +35,12 @@ TOOL_DEFINITIONS: List[Dict[str, Any]] = [
         "type": "function",
         "function": {
             "name": "write",
-            "description": "Tulis file baru atau overwrite. SELALU baca dulu jika file sudah ada (via read) kecuali memang disengaja. Buat direktori induk otomatis.",
+            "description": "Write a new file or overwrite. ALWAYS read first if file already exists (via read) unless intentional. Create parent directories automatically.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "filePath": {"type": "string", "description": "Path file tujuan"},
-                    "content": {"type": "string", "description": "Isi file lengkap"}
+                    "filePath": {"type": "string", "description": "Destination file path"},
+                    "content": {"type": "string", "description": "Complete file contents"}
                 },
                 "required": ["filePath", "content"],
                 "additionalProperties": False
@@ -51,13 +51,13 @@ TOOL_DEFINITIONS: List[Dict[str, Any]] = [
         "type": "function",
         "function": {
             "name": "edit",
-            "description": "Edit file dengan pencarian string eksak. oldString harus muncul tepat sekali. Untuk rename global set replaceAll=true.",
+            "description": "Edit file using exact string search. oldString must appear exactly once. For global rename set replaceAll=true.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "filePath": {"type": "string"},
-                    "oldString": {"type": "string", "description": "String yang diganti, harus eksak termasuk whitespace"},
-                    "newString": {"type": "string", "description": "String pengganti"},
+                    "oldString": {"type": "string", "description": "String to replace, must be exact including whitespace"},
+                    "newString": {"type": "string", "description": "Replacement string"},
                     "replaceAll": {"type": "boolean", "default": False}
                 },
                 "required": ["filePath", "oldString", "newString"],
@@ -69,12 +69,12 @@ TOOL_DEFINITIONS: List[Dict[str, Any]] = [
         "type": "function",
         "function": {
             "name": "glob",
-            "description": "Cari file berdasarkan pola glob (mis. **/*.py, src/**/*.ts). Cepat untuk eksplorasi codebase.",
+            "description": "Find files by glob pattern (e.g. **/*.py, src/**/*.ts). Fast for codebase exploration.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "pattern": {"type": "string", "description": "Glob pattern"},
-                    "path": {"type": "string", "description": "Direktori basis, default '.'"}
+                    "path": {"type": "string", "description": "Base directory, default '.'"}
                 },
                 "required": ["pattern"],
                 "additionalProperties": False
@@ -85,13 +85,13 @@ TOOL_DEFINITIONS: List[Dict[str, Any]] = [
         "type": "function",
         "function": {
             "name": "grep",
-            "description": "Cari regex di dalam file. Mengembalikan file:line dengan cuplikan.",
+            "description": "Search for regex inside files. Returns file:line with snippet.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "pattern": {"type": "string", "description": "Regex pattern"},
-                    "path": {"type": "string", "description": "Direktori/file basis, default '.'"},
-                    "include": {"type": "string", "description": "Filter file mis. *.py"}
+                    "path": {"type": "string", "description": "Base directory/file, default '.'"},
+                    "include": {"type": "string", "description": "File filter e.g. *.py"}
                 },
                 "required": ["pattern"],
                 "additionalProperties": False
@@ -102,12 +102,12 @@ TOOL_DEFINITIONS: List[Dict[str, Any]] = [
         "type": "function",
         "function": {
             "name": "bash",
-            "description": "Eksekusi perintah bash/shell. Gunakan untuk git, npm, python, ls, dll. Selalu quote path yang mengandung spasi.",
+            "description": "Execute bash/shell command. Use for git, npm, python, ls, etc. Always quote paths containing spaces.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "command": {"type": "string", "description": "Perintah shell"},
-                    "workdir": {"type": "string", "description": "Direktori kerja, default '.'"},
+                    "command": {"type": "string", "description": "Shell command"},
+                    "workdir": {"type": "string", "description": "Working directory, default '.'"},
                     "timeout": {"type": "integer", "description": "Timeout ms, default 120000"}
                 },
                 "required": ["command"],
@@ -119,7 +119,7 @@ TOOL_DEFINITIONS: List[Dict[str, Any]] = [
         "type": "function",
         "function": {
             "name": "skill_list",
-            "description": "List skill yang tersedia di .agent/skills. Panggil sebelum mengerjakan tugas yang butuh panduan skill.",
+            "description": "List available skills in .agent/skills. Call before working on tasks that require skill guidance.",
             "parameters": {
                 "type": "object",
                 "properties": {},
@@ -132,11 +132,11 @@ TOOL_DEFINITIONS: List[Dict[str, Any]] = [
         "type": "function",
         "function": {
             "name": "skill_load",
-            "description": "Muat isi lengkap skill (SKILL.md) untuk panduan detail. Argumen: name = nama folder skill.",
+            "description": "Load full skill contents (SKILL.md) for detailed guidance. Argument: name = skill folder name.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "name": {"type": "string", "description": "Nama skill (folder di .agent/skills)"}
+                    "name": {"type": "string", "description": "Skill name (folder in .agent/skills)"}
                 },
                 "required": ["name"],
                 "additionalProperties": False
@@ -145,23 +145,23 @@ TOOL_DEFINITIONS: List[Dict[str, Any]] = [
     },
 ]
 
-# ---------- Implementasi ----------
+# ---------- Implementation ----------
 
 def _truncate(s: str, max_chars: int = MAX_TOOL_OUTPUT_CHARS) -> str:
-    # Truncate cerdas - hemat token tapi pertahankan head + tail penting
+    # Smart truncate - save tokens but preserve important head + tail
     if len(s) <= max_chars:
         return s
-    # Untuk output tool panjang, simpan head + tail dengan notice di tengah
-    # Head 60% + tail 40% agar header dan awal file (yang penting) tetap ada
+    # For long tool output, keep head + tail with notice in the middle
+    # Head 60% + tail 40% so header and file start (important parts) are preserved
     head_len = int(max_chars * 0.6)
-    tail_len = max_chars - head_len - 100  # 100 untuk notice
-    notice = f"\n\n...[TRUNCATED cerdas {len(s)-max_chars} chars, total {len(s)} -> {max_chars} (hemat {(1-max_chars/len(s))*100:.0f}%)]...\n\n"
+    tail_len = max_chars - head_len - 100  # 100 for notice
+    notice = f"\n\n...[TRUNCATED smart {len(s)-max_chars} chars, total {len(s)} -> {max_chars} (saved {(1-max_chars/len(s))*100:.0f}%)]...\n\n"
     return s[:head_len] + notice + s[-tail_len:] if tail_len > 0 else s[:max_chars] + notice
 
 def tool_read(filePath: str, offset: int = 1, limit: int = 2000) -> str:
     p = pathlib.Path(filePath)
     if not p.exists():
-        return f"Error: file tidak ditemukan: {filePath}"
+        return f"Error: file not found: {filePath}"
     if p.is_dir():
         try:
             entries = sorted(os.listdir(p))
@@ -169,14 +169,14 @@ def tool_read(filePath: str, offset: int = 1, limit: int = 2000) -> str:
             for e in entries:
                 full = p / e
                 suffix = "/" if full.is_dir() else ""
-                # tampilkan hidden juga (os.listdir sudah)
+                # also show hidden (os.listdir already does)
                 lines.append(f"{e}{suffix}")
-            return "\n".join(lines) if lines else "(direktori kosong)"
+            return "\n".join(lines) if lines else "(empty directory)"
         except Exception as e:
-            return f"Error list dir {filePath}: {e}"
+            return f"Error listing dir {filePath}: {e}"
     try:
         size = p.stat().st_size
-        # Deteksi binary/image/pdf via magic + ext untuk b.md (hanya Responses yang didukung)
+        # Detect binary/image/pdf via magic + ext for b.md (only Responses supported)
         is_image = False
         is_pdf = False
         mime = None
@@ -211,15 +211,15 @@ def tool_read(filePath: str, offset: int = 1, limit: int = 2000) -> str:
                 mime,_ = _mt.guess_type(str(p))
                 mime = mime or "image/jpeg"
             abs_path = str(p.resolve())
-            # Marker sesuai b.md - akan ditolak jika bukan Response (providers.py)
+            # Marker per b.md - will be rejected if not a Response (providers.py)
             return f"Image read successfully\n[File: {filePath} | type: {mime} | {size} bytes]\n[[VISION_IMAGE:{abs_path}]]"
         if is_pdf:
             mime = mime or "application/pdf"
             abs_path = str(p.resolve())
             return f"PDF read successfully\n[File: {filePath} | type: {mime} | {size} bytes]\n[[INPUT_FILE:{abs_path}]]"
-        # batasi ukuran untuk text
+        # limit size for text
         if size > MAX_READ_BYTES * 5:
-            return f"Error: file terlalu besar ({size} bytes), gunakan offset/limit atau grep"
+            return f"Error: file too large ({size} bytes), use offset/limit or grep"
         with open(p, "r", encoding="utf-8", errors="ignore") as f:
             all_lines = f.readlines()
         total = len(all_lines)
@@ -227,10 +227,10 @@ def tool_read(filePath: str, offset: int = 1, limit: int = 2000) -> str:
         start = max(0, (offset or 1) - 1)
         end = start + (limit or 2000)
         chosen = all_lines[start:end]
-        # prefix nomor baris seperti read tool spec
+        # prefix line numbers per read tool spec
         out = []
         for i, line in enumerate(chosen, start=start+1):
-            # truncate line panjang >2000 chars
+            # truncate long lines >2000 chars
             if len(line) > 2000:
                 line = line[:2000] + "...[truncated]\n"
             out.append(f"{i}: {line.rstrip(chr(10))}")
@@ -255,16 +255,16 @@ def tool_write(filePath: str, content: str) -> str:
 def tool_edit(filePath: str, oldString: str, newString: str, replaceAll: bool = False) -> str:
     p = pathlib.Path(filePath)
     if not p.exists():
-        return f"Error: file tidak ditemukan: {filePath}"
+        return f"Error: file not found: {filePath}"
     try:
         with open(p, "r", encoding="utf-8", errors="ignore") as f:
             text = f.read()
         if oldString not in text:
-            return f"Error: oldString tidak ditemukan di {filePath}"
+            return f"Error: oldString not found in {filePath}"
         if not replaceAll:
             count = text.count(oldString)
             if count > 1:
-                return f"Error: oldString ditemukan {count} kali, gunakan replaceAll=true atau perkecil konteks"
+                return f"Error: oldString found {count} times, use replaceAll=true or narrow context"
             text = text.replace(oldString, newString, 1)
         else:
             text = text.replace(oldString, newString)
@@ -277,22 +277,22 @@ def tool_edit(filePath: str, oldString: str, newString: str, replaceAll: bool = 
 def tool_glob(pattern: str, path: str = ".") -> str:
     base = pathlib.Path(path) if path else pathlib.Path(".")
     if not base.exists():
-        return f"Error: base path tidak ada: {path}"
+        return f"Error: base path does not exist: {path}"
     try:
-        # gunakan glob recursif
-        # fnmatch + os.walk untuk tanpa deps
+        # use recursive glob
+        # fnmatch + os.walk for no dependencies
         matches: List[str] = []
-        # jika pattern mengandung **, gunakan pathlib.rglob
+        # if pattern contains **, use pathlib.rglob
         if "**" in pattern:
             # pathlib glob
             for m in base.glob(pattern):
                 matches.append(str(m).replace("\\", "/"))
         else:
-            # glob normal
+            # normal glob
             full_pat = str(base / pattern)
             for m in globmod.glob(full_pat, recursive=True):
                 matches.append(str(pathlib.Path(m)).replace("\\", "/"))
-        # fallback: walk + fnmatch untuk pattern sederhana
+        # fallback: walk + fnmatch for simple patterns
         if not matches and ("*" in pattern or "?" in pattern):
             for root, dirs, files in os.walk(base):
                 for name in files + dirs:
@@ -316,14 +316,14 @@ def tool_glob(pattern: str, path: str = ".") -> str:
 def tool_grep(pattern: str, path: str = ".", include: str = "") -> str:
     base = pathlib.Path(path) if path else pathlib.Path(".")
     if not base.exists():
-        return f"Error: path tidak ada: {path}"
+        return f"Error: path does not exist: {path}"
     try:
         regex = re.compile(pattern)
     except re.error as e:
         return f"Error: regex invalid '{pattern}': {e}"
     results: List[str] = []
     max_hits = 200
-    # tentukan file list
+    # determine file list
     files: List[pathlib.Path] = []
     if base.is_file():
         files = [base]
@@ -370,12 +370,12 @@ def tool_grep(pattern: str, path: str = ".", include: str = "") -> str:
 def tool_bash(command: str, workdir: str = ".", timeout: int = 120000) -> str:
     wd = pathlib.Path(workdir) if workdir else pathlib.Path(".")
     if not wd.exists():
-        return f"Error: workdir tidak ada: {workdir}"
+        return f"Error: workdir does not exist: {workdir}"
     try:
         # timeout ms -> s
         timeout_s = max(1, (timeout or 120000) / 1000)
-        # Windows: shell=True perlu, gunakan bash jika ada else cmd
-        # Kita pakai shell=True agar command string langsung dieksekusi
+        # Windows: shell=True required, use bash if available else cmd
+        # We use shell=True so command string is executed directly
         result = subprocess.run(
             command,
             shell=True,
@@ -401,7 +401,7 @@ def tool_bash(command: str, workdir: str = ".", timeout: int = 120000) -> str:
     except Exception as e:
         return f"Error bash '{command}': {e}"
 
-# Skill tools will be injected via skills.py at runtime, tapi sediakan stub
+# Skill tools will be injected via skills.py at runtime, but provide stubs
 def tool_skill_list() -> str:
     from .skills import list_skills
     return list_skills()
@@ -424,28 +424,28 @@ TOOL_IMPL: Dict[str, Any] = {
 }
 
 def execute_tool(name: str, arguments: Any) -> str:
-    """Eksekusi tool dengan aman, arguments bisa dict atau json string."""
+    """Execute tool safely, arguments can be dict or json string."""
     fn = TOOL_IMPL.get(name)
     if not fn:
-        return f"Error: tool tidak dikenal '{name}'. Available: {', '.join(TOOL_IMPL.keys())}"
-    # parse arguments jika string JSON
+        return f"Error: unknown tool '{name}'. Available: {', '.join(TOOL_IMPL.keys())}"
+    # parse arguments if JSON string
     if isinstance(arguments, str):
         try:
             arguments = json.loads(arguments) if arguments.strip() else {}
         except json.JSONDecodeError as e:
-            return f"Error: arguments JSON invalid untuk {name}: {e} | raw={arguments[:500]}"
+            return f"Error: invalid JSON arguments for {name}: {e} | raw={arguments[:500]}"
     if not isinstance(arguments, dict):
-        return f"Error: arguments harus object untuk {name}, got {type(arguments)}"
+        return f"Error: arguments must be object for {name}, got {type(arguments)}"
     try:
         result = fn(**arguments)
-        # pastikan string
+        # ensure string
         if not isinstance(result, str):
             result = str(result)
         return _truncate(result)
     except TypeError as e:
-        return f"Error: argumen tidak cocok untuk {name} {arguments}: {e}"
+        return f"Error: argument mismatch for {name} {arguments}: {e}"
     except Exception as e:
-        return f"Error eksekusi {name}: {e}"
+        return f"Error executing {name}: {e}"
 
 def get_tool_definitions() -> List[Dict[str, Any]]:
     return TOOL_DEFINITIONS

@@ -1,4 +1,4 @@
-"""Agent Loop - ReAct iterative dengan tool calling kuat."""
+"""Agent Loop - Iterative ReAct with powerful tool calling."""
 import json
 import sys
 import time
@@ -31,7 +31,7 @@ class AgentLoop:
         self.max_iterations = max_iterations
         self.verbose = verbose
         self._all_tool_defs = {t["function"]["name"]: t for t in get_tool_definitions()}
-        # Lazy: hanya load tool yang diperlukan, awalnya kosong, akan diisi per iterasi berdasarkan kebutuhan
+        # Lazy: only load required tools, initially empty, will be populated per iteration based on need
         self.tool_defs: List[Dict[str, Any]] = []
         self.permission_manager = permission_manager
         self.extra_body = extra_body or {}
@@ -40,12 +40,12 @@ class AgentLoop:
         self._loaded_tools: set = set()
 
     def _select_tools_for_input(self, user_input: str) -> List[Dict[str, Any]]:
-        """Pilih hanya tool yang diperlukan berdasarkan prompt user (lazy loading)."""
+        """Select only the required tools based on user prompt (lazy loading)."""
         text = user_input.lower()
         needed = set()
-        # Selalu sediakan skill discovery sebagai lazy entry point
-        # Tapi jangan load semua skill content, hanya via tool
-        # Heuristik berdasarkan kata kunci
+        # Always provide skill discovery as lazy entry point
+        # But don't load all skill content, only via tool
+        # Heuristic based on keywords
         if any(k in text for k in ["baca", "read", "lihat", "tampilkan", "file", "cat", "ls"]):
             needed.update(["read", "glob"])
         if any(k in text for k in ["tulis", "buat", "write", "simpan", "edit", "ubah", "ganti"]):
@@ -56,13 +56,13 @@ class AgentLoop:
             needed.update(["bash"])
         if any(k in text for k in ["skill", "kemampuan", "lakukan"]):
             needed.update(["skill_list", "skill_load"])
-        # Jika tidak ada yang match, berikan minimal discovery tools + read/bash sebagai fallback
+        # If nothing matches, provide minimal discovery tools + read/bash as fallback
         if not needed:
             needed.update(["read", "bash", "skill_list"])
-        # Selalu sertakan skill discovery jika belum ada
+        # Always include skill discovery if not already present
         if "skill_list" not in needed and "skill" in text:
             needed.add("skill_list")
-        # Buat list defs yang hanya diperlukan
+        # Build list of defs that are only required
         defs = [self._all_tool_defs[n] for n in needed if n in self._all_tool_defs]
         # Track loaded
         for n in needed:
@@ -70,26 +70,26 @@ class AgentLoop:
         return defs
 
     def _ensure_tool_loaded(self, fname: str):
-        """Jika LLM minta tool yang belum di-load, load on-demand untuk iter berikutnya."""
+        """If LLM requests a tool that hasn't been loaded, load on-demand for next iteration."""
         if fname not in self._loaded_tools and fname in self._all_tool_defs:
             self._loaded_tools.add(fname)
-            # Tambahkan ke tool_defs untuk iter berikutnya
+            # Add to tool_defs for next iteration
             if self._all_tool_defs[fname] not in self.tool_defs:
                 self.tool_defs.append(self._all_tool_defs[fname])
-                self._log(f"[lazy] tool '{fname}' dimuat on-demand")
+                self._log(f"[lazy] tool '{fname}' loaded on-demand")
 
     def _log(self, s: str):
         if self.verbose:
             print(s, file=sys.stderr, flush=True)
 
     def run(self, user_input: str, stream: bool = True) -> str:
-        """Satu turn: user_input -> loop hingga selesai -> return final answer."""
+        """One turn: user_input -> loop until done -> return final answer."""
         self.context.add_user(user_input)
         save_message(self.session_id, {"role": "user", "content": user_input})
-        # Lazy load: hanya tool yang diperlukan untuk prompt ini
+        # Lazy load: only tools required for this prompt
         self.tool_defs = self._select_tools_for_input(user_input)
         self._log(f"[tools] loaded {len(self.tool_defs)}: {', '.join(t['function']['name'] for t in self.tool_defs)} (lazy)")
-        # helper untuk ambil think saat ini
+        # helper to get current think
         def _current_think():
             return self.extra_body.get("reasoning_effort") if self.extra_body else "none"
 
@@ -100,29 +100,29 @@ class AgentLoop:
             messages = self.context.get_messages()
             self._log(f"[iter {iteration}/{self.max_iterations}]")
 
-            # Deteksi stuck loop: jika iterasi sudah banyak dan masih mengulang tool yang sama, ingatkan LLM
+            # Stuck loop detection: if many iterations have passed and still repeating same tool, nudge LLM
             if iteration in (15, 20, 25):
-                self._log(f"[warning] iter {iteration} masih berjalan, LLM mungkin stuck. Mendorong untuk segera memberikan jawaban akhir.")
-                self.context.messages.append({"role": "user", "content": f"[SYSTEM REMINDER] Kamu sudah di iterasi {iteration}/{self.max_iterations}. Jika sudah cukup informasi, segera berikan jawaban akhir. Jangan terus memanggil tool yang sama berulang kali (terutama fetch-skills/glob/grep). Jika stuck, buat kesimpulan terbaik dari informasi yang ada."})
+                self._log(f"[warning] iter {iteration} still running, LLM may be stuck. Pushing to provide final answer soon.")
+                self.context.messages.append({"role": "user", "content": f"[SYSTEM REMINDER] You are at iteration {iteration}/{self.max_iterations}. If you have enough information, please provide the final answer soon. Do not keep calling the same tool repeatedly (especially fetch-skills/glob/grep). If stuck, make the best conclusion from available information."})
                 messages = self.context.get_messages()
-            # Deteksi frekuensi tool yang berlebihan dalam history
+            # Detect excessive tool frequency in history
             if len(self._tool_history) >= 8:
                 from collections import Counter
                 recent = self._tool_history[-8:]
                 cnt = Counter([h.split(":")[0] for h in recent])
                 for tname, c in cnt.items():
                     if c >= 4:
-                        self._log(f"[warning] tool {tname} dipanggil {c}x dalam 8 panggilan terakhir, kemungkinan stuck.")
-                        self.context.messages.append({"role": "user", "content": f"[SYSTEM REMINDER] Tool '{tname}' sudah kamu panggil {c} kali dalam 8 panggilan terakhir dengan argumen serupa. Hasilnya sudah ada di history. JANGAN panggil '{tname}' lagi dengan argumen yang sama. Gunakan hasil yang sudah ada atau berikan jawaban akhir."})
+                        self._log(f"[warning] tool {tname} called {c}x in last 8 calls, likely stuck.")
+                        self.context.messages.append({"role": "user", "content": f"[SYSTEM REMINDER] Tool '{tname}' has been called {c} times in the last 8 calls with similar arguments. Result is already in history. DO NOT call '{tname}' again with the same arguments. Use the existing results or provide the final answer."})
                         break
 
-            # Streaming callbacks: print ke stdout langsung (tanpa TUI)
+            # Streaming callbacks: print directly to stdout (without TUI)
             def on_delta(tok: str):
                 if stream:
                     sys.stdout.write(tok)
                     sys.stdout.flush()
 
-            # Thinking callback - tampilkan saat LLM benar-benar reasoning
+            # Thinking callback - show when LLM is actually reasoning
             _think_started = False
             def on_reasoning_delta(tok: str):
                 nonlocal _think_started
@@ -133,14 +133,14 @@ class AgentLoop:
                     else:
                         self._log(f"<<< thinking")
                     _think_started = True
-                # Jika reasoning text tersedia (Anthropic thinking), bisa tampilkan sebagai dimmed? Untuk sekarang hanya indikator
-                # Jika ingin tampilkan reasoning, uncomment di bawah:
+                # If reasoning text is available (Anthropic thinking), could display as dimmed? For now just an indicator
+                # If you want to display reasoning, uncomment below:
                 # if stream and tok:
                 #     sys.stdout.write(tok)
                 #     sys.stdout.flush()
 
-            # Panggil LLM dengan extra_body (mis. reasoning_effort untuk thinking) - escape (Ctrl-C/ESC) membatalkan
-            # Jika non-stream dan thinking aktif, tampilkan thinking sebelum call (karena tidak ada streaming reasoning)
+            # Call LLM with extra_body (e.g. reasoning_effort for thinking) - escape (Ctrl-C/ESC) cancels
+            # If non-stream and thinking is active, show thinking before call (since there is no streaming reasoning)
             if not stream and _current_think() != "none" and not _think_started:
                 if _current_think() != "none":
                     self._log(f"<<< thinking [{_current_think()}]")
@@ -158,8 +158,8 @@ class AgentLoop:
                     timeout=120
                 )
             except KeyboardInterrupt:
-                # Escape membatalkan response - jangan simpan partial ke context/history
-                print("\n[escape] response dibatalkan", file=sys.stderr)
+                # Escape cancels response - don't save partial to context/history
+                print("\n[escape] response cancelled", file=sys.stderr)
                 try:
                     sys.stdout.write("\n")
                     sys.stdout.flush()
@@ -167,11 +167,11 @@ class AgentLoop:
                     pass
                 return "[cancelled - escape]"
             except Exception as e:
-                # Khusus binary file - hanya Response yang didukung
-                if "Model tidak didukung" in str(e):
-                    err = "Model tidak didukung"
+                # Special binary file - only Response is supported
+                if "Model tidak didukung" in str(e) or "Model not supported" in str(e):
+                    err = "Model not supported"
                     print(f"\n{err}", file=sys.stderr)
-                    # juga print ke stdout agar user lihat
+                    # also print to stdout so user can see
                     try:
                         print(err)
                     except:
@@ -189,7 +189,7 @@ class AgentLoop:
             tool_calls = result.get("tool_calls")
 
             if stream and content:
-                # sudah di-print via on_delta, beri newline jika ada tool_calls selanjutnya
+                # already printed via on_delta, add newline if there are subsequent tool_calls
                 if tool_calls:
                     sys.stdout.write("\n")
                     sys.stdout.flush()
@@ -198,22 +198,22 @@ class AgentLoop:
                     sys.stdout.flush()
 
             if not tool_calls:
-                # Cek apakah LLM sebutkan tool yang belum di-load tapi dibutuhkan (lazy fallback) - hanya dari content, bukan dari input
+                # Check if LLM mentioned a tool not yet loaded but needed (lazy fallback) - only from content, not from input
                 lower_content = content.lower() if content else ""
                 needs_tool = False
                 for tname in self._all_tool_defs:
                     if tname not in [t["function"]["name"] for t in self.tool_defs] and tname in lower_content:
-                        # LLM sebutkan tool yang belum di-load, load on-demand untuk iter berikutnya
+                        # LLM mentioned a tool not yet loaded, load on-demand for next iteration
                         self._ensure_tool_loaded(tname)
                         needs_tool = True
                 if needs_tool and iteration < self.max_iterations:
-                    # Inject reminder untuk pakai tool yang baru di-load
-                    self._log(f"[lazy] tool tambahan dimuat, minta LLM coba lagi")
-                    self.context.messages.append({"role": "user", "content": f"[SYSTEM] Tool yang kamu butuhkan sekarang tersedia: {', '.join([t['function']['name'] for t in self.tool_defs])}. Gunakan tool tersebut untuk menyelesaikan tugas, jangan hanya menjawab teks."})
-                    save_message(self.session_id, {"role": "user", "content": f"[SYSTEM] Tool tersedia: {', '.join([t['function']['name'] for t in self.tool_defs])}"})
+                    # Inject reminder to use newly loaded tool
+                    self._log(f"[lazy] additional tool loaded, asking LLM to try again")
+                    self.context.messages.append({"role": "user", "content": f"[SYSTEM] The tool you need is now available: {', '.join([t['function']['name'] for t in self.tool_defs])}. Use that tool to complete the task, don't just answer with text."})
+                    save_message(self.session_id, {"role": "user", "content": f"[SYSTEM] Available tools: {', '.join([t['function']['name'] for t in self.tool_defs])}"})
                     continue
-                # Selesai - tidak ada tool
-                # Jika stream=False, print content sekarang (handle UTF-8 di Windows)
+                # Done - no tools
+                # If stream=False, print content now (handle UTF-8 on Windows)
                 if not stream and content:
                     try:
                         print(content)
@@ -228,11 +228,11 @@ class AgentLoop:
                 final_answer = content
                 break
             else:
-                # Ada tool calls: simpan assistant message + eksekusi tools (sertakan model & think)
+                # Tool calls present: save assistant message + execute tools (include model & think)
                 self.context.add_assistant(content, tool_calls)
                 save_message(self.session_id, {"role": "assistant", "content": content, "tool_calls": tool_calls, "model": self.llm.model, "think_variant": _current_think()})
 
-                # Tampilkan hanya apa yang dikerjakan sesuai spec (tanpa hasil)
+                # Display only what is being done per spec (without results)
                 for tc in tool_calls:
                     fname = tc["function"]["name"]
                     fargs = tc["function"]["arguments"]
@@ -273,39 +273,39 @@ class AgentLoop:
                             args_str = json.dumps(fargs, ensure_ascii=False)
                         self._log(f"<<< {fname} {args_str}")
 
-                # Eksekusi tiap tool sequential dengan permission check - Batalkan truncate, simpan full
+                # Execute each tool sequentially with permission check - Cancel truncate, save full
                 for tc in tool_calls:
                     tid = tc.get("id", f"call_{iteration}")
                     fname = tc["function"]["name"]
                     fargs = tc["function"]["arguments"]
 
-                    # Tampilkan preparing sebelum eksekusi
+                    # Show preparing before execution
                     if fname in ("read", "write", "edit"):
                         parsed = json.loads(fargs) if isinstance(fargs, str) else fargs
                         fp = parsed.get("filePath") or parsed.get("filepath") or ""
                         self._log(f"<<< {fname} {fp}".strip())
 
-                    # Deduplikasi: cek apakah tool yang sama dengan args sama sudah dipanggil baru-baru ini
+                    # Deduplication: check if same tool with same args was called recently
                     try:
                         parsed_args = json.loads(fargs) if isinstance(fargs, str) else fargs
                         cache_key = f"{fname}:{json.dumps(parsed_args, sort_keys=True, ensure_ascii=False)}"
                     except:
                         cache_key = f"{fname}:{fargs}"
-                    # Track history untuk deteksi frekuensi
+                    # Track history for frequency detection
                     self._tool_history.append(cache_key)
                     if len(self._tool_history) > 20:
                         self._tool_history = self._tool_history[-20:]
-                    # Jika sudah pernah dipanggil dalam 5 panggilan terakhir dengan hasil yang sama, skip dan beri warning
+                    # If already called in last 5 calls with same result, skip and warn
                     if cache_key in self._tool_cache:
-                        # Cek apakah ini panggilan berulang dalam window pendek (5 terakhir)
-                        recent_calls = self._tool_history[-6:-1]  # 5 sebelum current
+                        # Check if this is a repeated call within short window (last 5)
+                        recent_calls = self._tool_history[-6:-1]  # 5 before current
                         if cache_key in recent_calls:
-                            self._log(f"[skip] {fname} dengan args sama sudah dipanggil baru-baru ini, gunakan cache")
-                            output = self._tool_cache[cache_key] + "\n\n[NOTE: Tool ini sudah dipanggil sebelumnya dengan argumen yang sama. Hasil di-cache untuk menghindari loop. Jangan panggil lagi dengan argumen sama.]"
+                            self._log(f"[skip] {fname} with same args was called recently, using cache")
+                            output = self._tool_cache[cache_key] + "\n\n[NOTE: This tool was already called previously with the same arguments. Result is cached to avoid loops. Do not call again with the same arguments.]"
                             self.context.add_tool_result(tid, fname, output)
                             save_message(self.session_id, {"role": "tool", "tool_call_id": tid, "name": fname, "content": output})
                             continue
-                    # Permission gate untuk hardware tools
+                    # Permission gate for hardware tools
                     if self.permission_manager is not None:
                         try:
                             parsed = json.loads(fargs) if isinstance(fargs, str) else fargs
@@ -314,32 +314,32 @@ class AgentLoop:
                             prompt_args = str(fargs)[:300]
                         allowed = self.permission_manager.check_or_prompt(fname, prompt_args)
                         if not allowed:
-                            output = f"[DENIED] User menolak eksekusi tool '{fname}' dengan args {prompt_args}. Sampaikan ke user bahwa izin ditolak dan tawarkan alternatif."
-                            # Truncate cerdas untuk history ringan
+                            output = f"[DENIED] User denied execution of tool '{fname}' with args {prompt_args}. Inform the user that permission was denied and offer alternatives."
+                            # Smart truncate for lightweight history
                             from agent_core.config import MAX_TOOL_OUTPUT_CHARS
                             if len(output) > MAX_TOOL_OUTPUT_CHARS:
                                 head = int(MAX_TOOL_OUTPUT_CHARS * 0.6)
                                 tail = MAX_TOOL_OUTPUT_CHARS - head - 100
-                                output = output[:head] + f"\n...[TRUNCATED cerdas {len(output)-MAX_TOOL_OUTPUT_CHARS} chars]...\n" + output[-tail:] if tail>0 else output[:MAX_TOOL_OUTPUT_CHARS]
+                                output = output[:head] + f"\n...[SMART TRUNCATED {len(output)-MAX_TOOL_OUTPUT_CHARS} chars]...\n" + output[-tail:] if tail>0 else output[:MAX_TOOL_OUTPUT_CHARS]
                             self.context.add_tool_result(tid, fname, output)
                             save_message(self.session_id, {"role": "tool", "tool_call_id": tid, "name": fname, "content": output})
                             continue
                     output = execute_tool(fname, fargs)
-                    # Simpan ke cache untuk deduplikasi (full)
+                    # Save to cache for deduplication (full)
                     self._tool_cache[cache_key] = output
-                    # Truncate cerdas sebelum simpan - hemat token 50-70% tapi pertahankan head+tail
+                    # Smart truncate before saving - saves 50-70% tokens but keeps head+tail
                     from agent_core.config import MAX_TOOL_OUTPUT_CHARS
                     to_store = output
                     if len(output) > MAX_TOOL_OUTPUT_CHARS:
                         head = int(MAX_TOOL_OUTPUT_CHARS * 0.6)
                         tail = MAX_TOOL_OUTPUT_CHARS - head - 100
-                        to_store = output[:head] + f"\n...[TRUNCATED cerdas {len(output)-MAX_TOOL_OUTPUT_CHARS} chars, hemat {(1-MAX_TOOL_OUTPUT_CHARS/len(output))*100:.0f}%]...\n" + output[-tail:] if tail>0 else output[:MAX_TOOL_OUTPUT_CHARS]
+                        to_store = output[:head] + f"\n...[SMART TRUNCATED {len(output)-MAX_TOOL_OUTPUT_CHARS} chars, saved {(1-MAX_TOOL_OUTPUT_CHARS/len(output))*100:.0f}%]...\n" + output[-tail:] if tail>0 else output[:MAX_TOOL_OUTPUT_CHARS]
                     self.context.add_tool_result(tid, fname, to_store)
                     save_message(self.session_id, {"role": "tool", "tool_call_id": tid, "name": fname, "content": to_store})
 
                 continue
         else:
-            # max iterations tercapai
+            # max iterations reached
             final_answer = content if 'content' in locals() else ""
             self._log(f"[max iterations {self.max_iterations} reached]")
             if not final_answer:
@@ -347,14 +347,14 @@ class AgentLoop:
                 self.context.add_assistant(final_answer)
                 save_message(self.session_id, {"role": "assistant", "content": final_answer, "model": self.llm.model, "think_variant": _current_think()})
 
-        # Token usage & iter & time hanya tampil ketika iter selesai (bukan saat berjalan)
+        # Token usage & iter & time only shown when iteration finishes (not while running)
         try:
             usage = self.context.token_usage()
             elapsed = time.time() - start_time
             h = int(elapsed // 3600)
             m = int((elapsed % 3600) // 60)
             s = int(elapsed % 60)
-            # n = total iter yang dijalankan (iteration terakhir)
+            # n = total iterations run (last iteration)
             n = iteration if 'iteration' in locals() else self.max_iterations
             self._log(f"[Total Iter: {n} | Token: {usage['tokens']}/{usage['max']} {usage['percent']}% | Time: {h}h {m}m {s}s]")
         except:

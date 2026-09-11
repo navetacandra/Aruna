@@ -1,8 +1,8 @@
-"""LLM client untuk multi-provider fallback - tanpa external deps, streaming SSE, tool calling.
-Mendukung OpenAI Chat/Responses dan Anthropic Messages dengan konversi otomatis.
-History disimpan tetap format OpenAI, request dikonversi sesuai provider.
-State provider per model disimpan di .agent/llm_provider_state.json dan akan rubah jika fallback terjadi.
-Mengacu pada opencode.js: zen/v1/chat/completions & zen/v1/responses + Anthropic v1/messages
+"""LLM client for multi-provider fallback - no external deps, SSE streaming, tool calling.
+Supports OpenAI Chat/Responses and Anthropic Messages with automatic conversion.
+History is always stored in OpenAI format, request is converted per provider.
+Provider state per model is stored in .agent/llm_provider_state.json and will change if fallback occurs.
+Refers to opencode.js: zen/v1/chat/completions & zen/v1/responses + Anthropic v1/messages
 """
 import json
 import re
@@ -24,7 +24,7 @@ from .providers import (
     is_responses_model,
 )
 
-# --- Helpers port dari opencode.js (tetap diekspor untuk kompatibilitas) ---
+# --- Helpers ported from opencode.js (still exported for compatibility) ---
 
 def generate_request_id() -> str:
     return f"msg_{uuid.uuid4().hex}"
@@ -32,7 +32,7 @@ def generate_request_id() -> str:
 def generate_session_id() -> str:
     return f"ses_{uuid.uuid4().hex}"
 
-# re-ekspor untuk import lama
+# re-export for legacy imports
 __all__ = ["LLMClient", "fetch_models", "generate_request_id", "generate_session_id", "base_model_id", "is_responses_model"]
 
 def fetch_models(base_url: str = OPENCODE_BASE_URL) -> List[Dict[str, Any]]:
@@ -56,19 +56,19 @@ class LLMClient:
         self.base_url = base_url.rstrip("/")
         self.session_id = session_id or generate_session_id()
 
-    # Backward compat: _prepare_body tetap ada tapi delegasi ke providers
+    # Backward compat: _prepare_body still exists but delegates to providers
     def _prepare_body(self, messages: List[Dict[str, Any]], tools: Optional[List[Dict]] = None,
                       extra_body: Optional[Dict[str, Any]] = None, stream: bool = True) -> Dict[str, Any]:
-        # Untuk kompatibilitas, gunakan opencode_chat logic
+        # For compatibility, use opencode_chat logic
         from .providers import prepare_payload_for_provider, ProviderSpec
-        # tebak provider dari model
+        # guess provider from model
         is_resp = is_responses_model(self.model)
         sdk = "openai_responses" if is_resp else "openai_chat"
         dummy = ProviderSpec("compat", self.base_url, "/zen/v1/chat/completions" if sdk=="openai_chat" else "/zen/v1/responses", sdk)
         return prepare_payload_for_provider(dummy, self.model, messages, tools, extra_body, stream)
 
     def _headers(self) -> Dict[str, str]:
-        # Untuk kompatibilitas, return opencode headers
+        # For compatibility, return opencode headers
         from .providers import _opencode_headers
         return _opencode_headers(self.session_id)
 
@@ -81,29 +81,29 @@ class LLMClient:
              on_tool_delta: Optional[Callable[[str], None]] = None,
              on_reasoning_delta: Optional[Callable[[str], None]] = None,
              timeout: int = 120) -> Dict[str, Any]:
-        """Kirim chat dengan fallback multi-provider.
-        History tetap OpenAI format, payload otomatis dikonversi per provider.
-        State format/url per model disimpan dan akan rubah jika fallback terjadi.
+        """Send chat with multi-provider fallback.
+        History stays in OpenAI format, payload is automatically converted per provider.
+        State format/url per model is stored and will change if fallback occurs.
         Returns dict: {content: str, tool_calls: list|None, finish_reason: str}
         """
         candidates = build_candidate_providers(self.model, self.base_url)
         last_exc: Optional[Exception] = None
 
         for provider in candidates:
-            # Untuk 429, retry same provider hingga 5 kali dengan backoff 5 + (n-1)*3
-            # Jika 429, jangan fallback ke SDK lain dulu, cek dulu karena bukan kesalahan format
-            # Escape (Ctrl-C / ESC) membatalkan response - jangan retry, langsung batal
+            # For 429, retry same provider up to 5 times with backoff 5 + (n-1)*3
+            # If 429, don't fallback to another SDK yet, check first because it's not a format error
+            # Escape (Ctrl-C / ESC) cancels response - don't retry, cancel immediately
             for attempt in range(1, 6):
                 try:
                     result = self._chat_with_provider(provider, messages, tools, extra_body, stream, on_delta, on_tool_delta, on_reasoning_delta, timeout)
-                    # simpan state sukses untuk model yang sama (akan dipakai lagi) - tanpa log mengganggu
+                    # save success state for same model (will be reused) - without noisy logging
                     try:
                         update_provider_state(self.model, provider.sdk, provider.endpoint, provider.base_url)
                     except:
                         pass
                     return result
                 except KeyboardInterrupt:
-                    print("\n[escape] response dibatalkan (Ctrl-C / ESC)", file=sys.stderr)
+                    print("\n[escape] response cancelled (Ctrl-C / ESC)", file=sys.stderr)
                     raise
                 except urllib.error.HTTPError as e:
                     body_txt = ""
@@ -114,10 +114,10 @@ class LLMClient:
                         pass
                     msg = f"HTTP {e.code}: {body_txt[:500]}"
                     if e.code == 429:
-                        # 429 bukan kesalahan format, jangan fallback dulu, retry same provider
+                        # 429 is not a format error, don't fallback yet, retry same provider
                         if attempt < 5:
                             wait = 5 + (attempt - 1) * 3  # 5, 8, 11, 14
-                            # Format sesuai instruksi: "{error_message} {n} Retry on {x} seconds.."
+                            # Format per instructions: "{error_message} {n} Retry on {x} seconds.."
                             err_msg = body_txt.strip()[:200] if body_txt.strip() else msg
                             print(f"{err_msg} {attempt} Retry on {wait} seconds..", file=sys.stderr)
                             try:
@@ -126,27 +126,27 @@ class LLMClient:
                                 raise RuntimeError(f"Interrupted during 429 retry for {provider.name}") from e
                             continue  # retry same provider
                         else:
-                            # sudah 5 kali, fallback ke SDK lain
+                            # already 5 times, fallback to other SDK
                             _wrapped = RuntimeError(f"Provider {provider.name} {provider.url} failed after 5 retries {msg}")
                             _wrapped.__cause__ = e
                             last_exc = _wrapped
-                            print(f"[429] {provider.name} {provider.url} gagal setelah 5 retries {e.code}, fallback ke SDK lain...", file=sys.stderr)
-                            break  # break inner retry, lanjut ke provider berikutnya
-                    # Semua HTTP error lain langsung fallback ke provider lain
+                            print(f"[429] {provider.name} {provider.url} failed after 5 retries {e.code}, falling back to other SDK...", file=sys.stderr)
+                            break  # break inner retry, continue to next provider
+                    # All other HTTP errors immediately fallback to another provider
                     _wrapped = RuntimeError(f"Provider {provider.name} {provider.url} failed {msg}")
                     _wrapped.__cause__ = e
                     last_exc = _wrapped
-                    print(f"[provider fallback] {provider.name} {provider.url} gagal {e.code}, coba fallback...", file=sys.stderr)
-                    break  # break inner retry, lanjut ke provider berikutnya
+                    print(f"[provider fallback] {provider.name} {provider.url} failed {e.code}, trying fallback...", file=sys.stderr)
+                    break  # break inner retry, continue to next provider
                 except Exception as e:
-                    # Jika binary file dan bukan Response -> langsung tolak tanpa fallback
-                    if "Model tidak didukung" in str(e):
-                        raise RuntimeError("Model tidak didukung") from e
+                    # If binary file and not a Response -> reject directly without fallback
+                    if "Model not supported" in str(e):
+                        raise RuntimeError("Model not supported") from e
                     last_exc = e
-                    print(f"[provider fallback] {provider.name} {provider.url} error: {e}, coba fallback...", file=sys.stderr)
+                    print(f"[provider fallback] {provider.name} {provider.url} error: {e}, trying fallback...", file=sys.stderr)
                     break  # non-HTTP error, fallback
 
-        # semua gagal
+        # all failed
         if last_exc:
             raise RuntimeError(f"All providers failed for {self.model}: {last_exc}") from last_exc
         raise RuntimeError("All providers failed")
@@ -154,9 +154,9 @@ class LLMClient:
     def _chat_with_provider(self, provider, messages, tools, extra_body, stream, on_delta, on_tool_delta, on_reasoning_delta, timeout):
         body = prepare_payload_for_provider(provider, self.model, messages, tools, extra_body, stream)
         headers = get_headers_for_provider(provider, self.session_id)
-        # Request body tetap raw JSON (server opencode tidak support Content-Encoding: gzip untuk request, percobaan menghasilkan 401)
-        # Hanya minta compressed response via Accept-Encoding (hemat Down bandwidth 99% - benchmark)
-        # Default brotli q4 untuk response - hemat +35% vs gzip
+        # Request body stays raw JSON (opencode server does not support Content-Encoding: gzip for request, attempt resulted in 401)
+        # Only request compressed response via Accept-Encoding (saves Down bandwidth 99% - benchmark)
+        # Default brotli q4 for response - saves +35% vs gzip
         try:
             import brotli
             headers["Accept-Encoding"] = "br, gzip"
@@ -241,7 +241,7 @@ class LLMClient:
 
                     for line in lines:
                         trimmed = line.strip()
-                        # Anthropic kadang kirim event: line, tapi untuk openai hanya data:
+                        # Anthropic sometimes sends event: line, but for openai only data:
                         if not trimmed or trimmed.startswith("event:"):
                             continue
                         if not trimmed.startswith("data:"):
@@ -254,11 +254,11 @@ class LLMClient:
                         except json.JSONDecodeError:
                             continue
 
-                        # Responses API delta - sesuai SDK-example.md sec 2
+                        # Responses API delta - per SDK-example.md sec 2
                         handled = False
                         ptype = parsed.get("type", "")
                         if isinstance(ptype, str) and ptype.startswith("response."):
-                            # Reasoning - saat LLM melakukan reasoning
+                            # Reasoning - when LLM is reasoning
                             if "reasoning" in ptype:
                                 d = parsed.get("delta", "") or parsed.get("text", "") or parsed.get("summary", "") or "reasoning"
                                 if on_reasoning_delta:
@@ -407,13 +407,13 @@ class LLMClient:
         return {"content": "".join(content_parts), "tool_calls": tool_calls, "finish_reason": finish_reason or ("tool_calls" if tool_calls else "stop")}
 
     def _stream_anthropic(self, req, timeout, on_delta, on_tool_delta, on_reasoning_delta=None):
-        """Streaming khusus Anthropic SSE (event: + data:) dinormalisasi ke OpenAI."""
+        """Special Anthropic SSE streaming (event: + data:) normalized to OpenAI."""
         content_parts: List[str] = []
         # anthropic tool_use: index -> {id, name, input_json}
         tool_accum: Dict[int, Dict[str, Any]] = {}
         # mapping content_block index -> type
         block_types: Dict[int, str] = {}
-        # untuk tool delta, simpan partial_json
+        # for tool delta, keep partial_json
         finish_reason = None
         current_event = None
 
@@ -506,7 +506,7 @@ class LLMClient:
                                     if on_tool_delta:
                                         on_tool_delta(pj)
                                 else:
-                                    # fallback: jika belum ada, buat entry
+                                    # fallback: if not yet present, create entry
                                     if idx not in tool_accum:
                                         tool_accum[idx] = {"id": f"toolu_{idx}", "name": "", "input_json": pj}
                                     else:
@@ -529,14 +529,14 @@ class LLMClient:
                             finish_reason = finish_reason or "stop"
                             break
                         else:
-                            # Fallback: jika ada text delta langsung
+                            # Fallback: if there's direct text delta
                             if "delta" in parsed and isinstance(parsed["delta"], dict) and "text" in parsed["delta"]:
                                 txt = parsed["delta"]["text"]
                                 content_parts.append(txt)
                                 if on_delta:
                                     on_delta(txt)
 
-                    # anthropic biasanya tidak pakai [DONE], tapi event message_stop
+                    # anthropic usually doesn't use [DONE], but event message_stop
                     if finish_reason and current_event == "message_stop":
                         break
 
@@ -546,7 +546,7 @@ class LLMClient:
                         data_str = buffer.strip()[len("data:"):].strip()
                         if data_str and data_str != "[DONE]":
                             parsed = json.loads(data_str)
-                            # cek text
+                            # check text
                             if parsed.get("type") == "content_block_delta":
                                 delta = parsed.get("delta", {})
                                 if delta.get("text"):
@@ -570,19 +570,19 @@ class LLMClient:
             tool_calls = []
             for idx in sorted(tool_accum.keys()):
                 acc = tool_accum[idx]
-                # skip jika bukan tool_use (text blocks tidak di tool_accum)
+                # skip if not tool_use (text blocks not in tool_accum)
                 if not acc.get("name"):
                     continue
-                # input_json mungkin tidak lengkap? coba parse
+                # input_json may be incomplete? try parse
                 raw = acc.get("input_json", "{}")
                 if not raw.strip():
                     raw = "{}"
-                # validasi JSON, jika gagal biarkan raw
+                # validate JSON, if fails leave raw
                 try:
                     json.loads(raw)
                     args = raw
                 except:
-                    args = raw  # biarkan, nanti execute_tool akan error jika invalid
+                    args = raw  # leave, later execute_tool will error if invalid
                 tool_calls.append({
                     "id": acc.get("id") or f"call_{idx}_{uuid.uuid4().hex[:8]}",
                     "type": "function",

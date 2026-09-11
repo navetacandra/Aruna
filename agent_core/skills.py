@@ -1,4 +1,4 @@
-"""Skill loader untuk .agent/skills/*/SKILL.md"""
+"""Skill loader for .agent/skills/*/SKILL.md"""
 import pathlib
 import re
 from typing import Dict, List
@@ -10,14 +10,14 @@ def _parse_skill_file(path: pathlib.Path) -> Dict[str, str]:
         text = path.read_text(encoding="utf-8", errors="ignore")
     except Exception as e:
         return {"name": path.parent.name, "description": f"error read: {e}", "content": ""}
-    # coba parse frontmatter --- yaml ---
+    # try to parse frontmatter --- yaml ---
     description = ""
-    # ambil heading pertama sebagai deskripsi fallback
-    # cari frontmatter
+    # take first heading as fallback description
+    # find frontmatter
     fm_match = re.match(r"^---\s*\n(.*?)\n---\s*\n", text, re.DOTALL)
     if fm_match:
         fm = fm_match.group(1)
-        # cari description: field
+        # look for description: field
         m = re.search(r"description\s*:\s*(.+)", fm, re.IGNORECASE)
         if m:
             description = m.group(1).strip().strip('"').strip("'")
@@ -27,7 +27,7 @@ def _parse_skill_file(path: pathlib.Path) -> Dict[str, str]:
     else:
         name = path.parent.name
         content = text
-        # cari # Title
+        # find # Title
         h1 = re.search(r"^#\s+(.+)", content, re.MULTILINE)
         if h1:
             description = h1.group(1).strip()
@@ -52,10 +52,10 @@ def discover_skills(skills_dir: str = None) -> Dict[str, Dict[str, str]]:
     for child in base.iterdir():
         if not child.is_dir():
             continue
-        # cari SKILL.md case-insensitive
+        # look for SKILL.md case-insensitive
         candidates = list(child.glob("SKILL.md")) + list(child.glob("skill.md")) + list(child.glob("SKILL.MD"))
         if not candidates:
-            # cari *.md apapun di folder
+            # look for any *.md in folder
             candidates = list(child.glob("*.md"))
         if not candidates:
             continue
@@ -70,11 +70,11 @@ def list_skills(skills_dir: str = None) -> str:
         skills_dir = SKILLS_DIR
     skills = discover_skills(skills_dir)
     if not skills:
-        return f"(no skills) direktori {skills_dir} kosong atau tidak ada. Buat folder .agent/skills/<nama>/SKILL.md untuk menambah skill."
+        return f"(no skills) directory {skills_dir} is empty or does not exist. Create folder .agent/skills/<name>/SKILL.md to add a skill."
     lines = [f"Available skills ({len(skills)}):"]
     for name, info in sorted(skills.items()):
         lines.append(f"- {name}: {info['description']}  [path: {info['path']}]")
-    lines.append("\nGunakan skill_load(name) untuk memuat panduan lengkap.")
+    lines.append("\nUse skill_load(name) to load the full guide.")
     return "\n".join(lines)
 
 def load_skill(name: str, skills_dir: str = None) -> str:
@@ -88,7 +88,7 @@ def load_skill(name: str, skills_dir: str = None) -> str:
             key = k
             break
     if not key:
-        return f"Error: skill '{name}' tidak ditemukan. Available: {', '.join(sorted(skills.keys())) or '(none)'}"
+        return f"Error: skill '{name}' not found. Available: {', '.join(sorted(skills.keys())) or '(none)'}"
     info = skills[key]
     header = f"# Skill: {info['name']}\nPath: {info['path']}\nDescription: {info['description']}\n\n"
     return header + info["content"]

@@ -1,4 +1,4 @@
-"""History JSONL per session di .agent/hists/<session_id>.jsonl"""
+"""JSONL history per session in .agent/hists/<session_id>.jsonl"""
 import json
 import pathlib
 import time
@@ -45,15 +45,15 @@ def load_history(session_id: str, hists_dir: str = None) -> List[Dict[str, Any]]
     return out
 
 def load_messages(session_id: str, hists_dir: str = None) -> List[Dict[str, Any]]:
-    """Kembalikan list messages (role/content/tool_calls) untuk resume context. History tetap OpenAI format, model/think disimpan terpisah dan tidak dimasukkan ke messages LLM."""
+    """Return list of messages (role/content/tool_calls) for resuming context. History stays in OpenAI format, model/think are stored separately and not included in LLM messages."""
     if hists_dir is None:
         hists_dir = HISTS_DIR
     entries = load_history(session_id, hists_dir)
     msgs: List[Dict[str, Any]] = []
     for e in entries:
-        # entry bisa berupa message langsung atau wrapper
+        # entry can be a direct message or wrapper
         if "role" in e and "content" in e:
-            # filter ts etc, tapi pertahankan hanya field LLM (model/think tidak dikirim ke LLM, hanya metadata)
+            # filter ts etc, but keep only LLM fields (model/think not sent to LLM, only metadata)
             m = {k: v for k, v in e.items() if k in ("role", "content", "tool_calls", "tool_call_id", "name")}
             msgs.append(m)
         elif "message" in e and isinstance(e["message"], dict):
@@ -61,14 +61,14 @@ def load_messages(session_id: str, hists_dir: str = None) -> List[Dict[str, Any]
     return msgs
 
 def get_last_model_and_think(session_id: str, hists_dir: str = None) -> tuple[Optional[str], Optional[str]]:
-    """Ambil model dan thinking variant terakhir dari history. Returns (model, think) atau (None, None) jika tidak ada."""
+    """Get the last model and thinking variant from history. Returns (model, think) or (None, None) if none."""
     if hists_dir is None:
         hists_dir = HISTS_DIR
     entries = load_history(session_id, hists_dir)
     last_model = None
     last_think = None
     for e in entries:
-        # cari field model/think_variant atau model/thinking di entry
+        # look for model/think_variant or model/thinking field in entry
         if "model" in e:
             last_model = e.get("model")
         if "think_variant" in e:
@@ -77,7 +77,7 @@ def get_last_model_and_think(session_id: str, hists_dir: str = None) -> tuple[Op
             last_think = e.get("thinking")
         elif "think" in e:
             last_think = e.get("think")
-        # juga cek di dalam message wrapper jika ada
+        # also check inside message wrapper if present
         if "message" in e and isinstance(e["message"], dict):
             msg = e["message"]
             if "model" in msg:

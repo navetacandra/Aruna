@@ -1,7 +1,7 @@
-"""Context Manager - krusial untuk hasil bagus.
-- Estimasi token tanpa external deps (chars/4 heuristic)
-- Kompaksi: keep system + recent, older di-summarize/truncate
-- Truncate tool output besar
+"""Context Manager - crucial for good results.
+- Token estimation without external deps (chars/4 heuristic)
+- Compaction: keep system + recent, older summarized/truncated
+- Truncate large tool output
 """
 import json
 from typing import Any, Dict, List
@@ -11,13 +11,13 @@ from .config import COMPACTION_THRESHOLD, KEEP_RECENT_MESSAGES, MAX_CONTEXT_TOKE
 def estimate_tokens(text: str) -> int:
     if not text:
         return 0
-    # heuristic: ~4 chars per token, fallback ke word count
+    # heuristic: ~4 chars per token, fallback to word count
     return max(len(text) // 4, len(text.split()) // 2 + 1) + 2
 
 def estimate_messages_tokens(messages: List[Dict[str, Any]]) -> int:
     total = 0
     for m in messages:
-        # content bisa string atau list/pilihan
+        # content can be string or list/options
         c = m.get("content")
         if isinstance(c, str):
             total += estimate_tokens(c)
@@ -29,7 +29,7 @@ def estimate_messages_tokens(messages: List[Dict[str, Any]]) -> int:
                     total += estimate_tokens(str(part))
         elif c is not None:
             total += estimate_tokens(str(c))
-        # tool_calls juga hitung
+        # also count tool_calls
         tcs = m.get("tool_calls")
         if tcs:
             total += estimate_tokens(json.dumps(tcs, ensure_ascii=False))
@@ -39,7 +39,7 @@ def estimate_messages_tokens(messages: List[Dict[str, Any]]) -> int:
 
 
 class ContextManager:
-    """Kelola percakapan + kompaksi otomatis."""
+    """Manage conversation + automatic compaction."""
     def __init__(self, system_prompt: str, max_tokens: int = MAX_CONTEXT_TOKENS,
                  keep_recent: int = KEEP_RECENT_MESSAGES):
         self.system_prompt = system_prompt
@@ -60,11 +60,11 @@ class ContextManager:
         self.messages.append(msg)
 
     def add_tool_result(self, tool_call_id: str, name: str, content: str):
-        # Truncate cerdas - hemat token 50-70% tapi pertahankan head+tail penting
+        # Smart truncate - saves 50-70% tokens while preserving important head+tail
         if len(content) > MAX_TOOL_OUTPUT_CHARS:
             head = int(MAX_TOOL_OUTPUT_CHARS * 0.6)
             tail = MAX_TOOL_OUTPUT_CHARS - head - 100
-            notice = f"\n...[TRUNCATED cerdas {len(content)-MAX_TOOL_OUTPUT_CHARS} chars]...\n"
+            notice = f"\n...[SMART TRUNCATED {len(content)-MAX_TOOL_OUTPUT_CHARS} chars]...\n"
             content = content[:head] + notice + content[-tail:] if tail > 0 else content[:MAX_TOOL_OUTPUT_CHARS]
         self.messages.append({
             "role": "tool",
@@ -73,38 +73,38 @@ class ContextManager:
             "content": content
         })
 
-    # untuk kompatibilitas format lama: add_tool dengan (id, content)
+    # for backward compatibility with old format: add_tool with (id, content)
     def add_tool(self, tool_call_id: str, content: str, name: str = "tool"):
         self.add_tool_result(tool_call_id, name, content)
 
     def get_messages(self, force_compact: bool = False) -> List[Dict[str, Any]]:
         tokens = estimate_messages_tokens(self.messages)
         threshold = int(self.max_tokens * COMPACTION_THRESHOLD)
-        # iterative compaction sampai di bawah threshold
+        # iterative compaction until below threshold
         attempts = 0
         while (force_compact or tokens > threshold) and attempts < 5:
             before = len(self.messages)
             did = self._compact(tokens, threshold)
             if not did:
                 break
-            force_compact = False  # hanya paksa sekali
+            force_compact = False  # only force once
             tokens = estimate_messages_tokens(self.messages)
-            # jika masih di atas threshold dan masih banyak pesan, kurangi keep_recent dan coba lagi
+            # if still above threshold and many messages remain, reduce keep_recent and try again
             if tokens > threshold and len(self.messages) > self.keep_recent + 2:
-                # perkecil keep_recent untuk percobaan berikutnya (simulasi adaptive)
-                # _compact berikutnya akan keep lebih sedikit karena kita tidak ubah keep_recent permanen,
-                # tapi kita bisa langsung potong pesan recent tertua
+                # reduce keep_recent for next attempt (adaptive simulation)
+                # next _compact will keep fewer because we don't change keep_recent permanently,
+                # but we can directly cut the oldest recent messages
                 if tokens > self.max_tokens * 0.95:
-                    # emergency: potong pesan tengah yang masih besar (keep hanya 2 terbaru)
-                    # rebuild dengan 2 terbaru saja
+                    # emergency: cut middle messages that are still large (keep only 2 latest)
+                    # rebuild with 2 latest only
                     system = self.messages[0]
-                    # ambil 2 terbaru selain system
+                    # take 2 latest besides system
                     recent = self.messages[-2:]
-                    # ringkas sisanya yang sekarang (di antara system dan recent)
+                    # summarize the remaining ones (between system and recent)
                     middle = self.messages[1:-2]
                     if middle:
                         self._compaction_count += 1
-                        summary = f"[Emergency compaction #{self._compaction_count}: {len(middle)} pesan dipotong karena masih >95% limit]"
+                        summary = f"[Emergency compaction #{self._compaction_count}: {len(middle)} messages truncated because still >95% limit]"
                         self.messages = [system, {"role": "user", "content": summary}] + recent
                         tokens = estimate_messages_tokens(self.messages)
             attempts += 1
@@ -113,27 +113,27 @@ class ContextManager:
         return self.messages
 
     def _compact(self, current_tokens: int, threshold: int) -> bool:
-        """Strategi kompaksi: keep system + last N, middle diringkas jadi 1 message.
-        Return True jika melakukan kompaksi.
+        """Compaction strategy: keep system + last N, middle summarized into 1 message.
+        Return True if compaction was performed.
         """
         if len(self.messages) <= self.keep_recent + 1:
-            return False  # tidak ada yang bisa dikompaksi
-        # selalu keep system
+            return False  # nothing to compact
+        # always keep system
         system = self.messages[0]
         # keep recent N
         recent = self.messages[-self.keep_recent:]
-        # middle yang akan diringkas
+        # middle to be summarized
         middle = self.messages[1:-self.keep_recent]
         if not middle:
             return
 
-        # Buat summary manual tanpa LLM (agar tanpa deps & cepat)
-        # Hitung stats
+        # Create manual summary without LLM (to avoid deps & be fast)
+        # Calculate stats
         middle_tokens = estimate_messages_tokens(middle)
-        summary_lines = [f"[Context compaction #{self._compaction_count+1}: {len(middle)} pesan lama (~{middle_tokens} tokens) diringkas]"]
+        summary_lines = [f"[Context compaction #{self._compaction_count+1}: {len(middle)} old messages (~{middle_tokens} tokens) summarized]"]
         for m in middle:
             role = m.get("role", "?")
-            # ringkas tiap message jadi 1 baris
+            # summarize each message into 1 line
             c = m.get("content", "")
             if isinstance(c, str):
                 snippet = c[:400].replace("\n", " ").strip()
@@ -153,16 +153,16 @@ class ContextManager:
                 snippet = f"tool:{m.get('name','')} -> {snippet[:300]}"
             summary_lines.append(f"- {role}: {snippet}")
             if len("\n".join(summary_lines)) > 4000:
-                summary_lines.append(f"...(+{len(middle)-len(summary_lines)+1} pesan lain dipotong)")
+                summary_lines.append(f"...(+{len(middle)-len(summary_lines)+1} other messages truncated)")
                 break
 
         summary_text = "\n".join(summary_lines)
         self._compaction_count += 1
 
-        # Rebuild messages: system + summary (sebagai user note) + recent
+        # Rebuild messages: system + summary (as user note) + recent
         summary_msg = {
             "role": "user",
-            "content": f"[SYSTEM NOTE - CONTEXT COMPACTED]\n{summary_text}\n[End compaction - lanjutkan dengan konteks recent di bawah]"
+            "content": f"[SYSTEM NOTE - CONTEXT COMPACTED]\n{summary_text}\n[End compaction - continue with recent context below]"
         }
         self.messages = [system, summary_msg] + recent
         return True
@@ -175,9 +175,9 @@ class ContextManager:
         return list(self.messages)
 
     def load(self, messages: List[Dict[str, Any]]):
-        """Load dari history (mis. resume session)."""
+        """Load from history (e.g. resume session)."""
         if messages and messages[0].get("role") == "system":
             self.messages = messages
         else:
-            # ensure system tetap di depan
+            # ensure system stays at front
             self.messages = [{"role": "system", "content": self.system_prompt}] + messages

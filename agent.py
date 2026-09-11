@@ -1,24 +1,24 @@
 #!/usr/bin/env python3
-"""Agent CLI - sederhana tanpa TUI, input user selalu di bawah.
+"""Agent CLI - simple without TUI, user input always at the bottom.
 
 Usage:
   python agent.py                   # interactive REPL
-  python agent.py --once "tanya"    # single turn
+  python agent.py --once "query"    # single turn
   python agent.py --model mimo-v2.5-free --session ses_xxx
   python agent.py --list-models
-  python agent.py --continue        # lanjut sesi terakhir
+  python agent.py --continue        # continue last session
 
 Commands REPL:
-  /compact                 kompaksi context manual
-  /model(s) [name]         lihat daftar model & pilih (interaktif jika tanpa arg)
-  /usage(s)                lihat penggunaan token
-  /skill(s) [name]         lihat daftar skill / load skill
-  /reload                  reload state tanpa kehilangan konteks
-  /think [variant]         lihat/pilih thinking variant (none/low/medium/high/xhigh)
-  /tool-call [mode]        izin tool: accept-all, accept-fs, ask
-  /info                    tampilkan model, token, panjang chat
-  @nama_file               embed file (text/binary pdf/foto) ke prompt, cth: @README.md @\"my file.pdf\"
-  !<command>               jalankan shell langsung (terminatable via Ctrl-C)
+  /compact                 manual context compaction
+  /model(s) [name]         view model list & select (interactive if no arg)
+  /usage(s)                view token usage
+  /skill(s) [name]         view skill list / load skill
+  /reload                  reload state without losing context
+  /think [variant]         view/select thinking variant (none/low/medium/high/xhigh)
+  /tool-call [mode]        tool permission: accept-all, accept-fs, ask
+  /info                    show model, token, chat length
+  @file_name               embed file (text/binary pdf/photo) into prompt, e.g.: @README.md @"my file.pdf"
+  !<command>               run shell directly (terminatable via Ctrl-C)
   /help, /clear, /session, /exit
 """
 import argparse
@@ -43,13 +43,13 @@ from agent_core.permissions import PermissionManager
 THINK_VARIANTS = ["none", "low", "medium", "high", "xhigh"]  # none = non-thinking, xhigh = extra high
 DEFAULT_THINK = "none"
 
-# Untuk @file embedding
+# For @file embedding
 import re
 import base64
 import mimetypes
 
 def _is_binary_file(path: pathlib.Path) -> bool:
-    # Deteksi binary via ekstensi atau coba baca
+    # Detect binary via extension or try reading
     bin_exts = {".pdf", ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".ico", ".zip", ".tar", ".gz", ".exe", ".bin", ".docx", ".xlsx", ".pptx"}
     if path.suffix.lower() in bin_exts:
         return True
@@ -58,7 +58,7 @@ def _is_binary_file(path: pathlib.Path) -> bool:
             chunk = f.read(8000)
             if b"\x00" in chunk:
                 return True
-            # coba decode
+            # try to decode
             chunk.decode("utf-8")
             return False
     except:
@@ -68,7 +68,7 @@ def _handle_binary_file(path: pathlib.Path) -> str:
     size = path.stat().st_size if path.exists() else 0
     mime, _ = mimetypes.guess_type(str(path))
     mime = mime or "application/octet-stream"
-    # deteksi mime via magic agar beboo.png (JPEG) benar
+    # detect mime via magic so beboo.png (JPEG) is correct
     try:
         with open(path, "rb") as fh:
             head = fh.read(12)
@@ -87,20 +87,20 @@ def _handle_binary_file(path: pathlib.Path) -> str:
     ext = path.suffix.lower()
     header = f"[Binary file: {path} | type: {mime} | size: {size} bytes]"
     abs_path = str(path.resolve()) if path.exists() else str(path)
-    # Untuk gambar & PDF, buat marker untuk Response API (b.md)
-    # Jika model bukan Response, akan ditolak di providers.prepare_payload -> Model tidak didukung
+    # For images & PDFs, create marker for Response API (b.md)
+    # If model is not Response, will be rejected in providers.prepare_payload -> Model not supported
     if mime.startswith("image/") or ext in (".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"):
-        return f"{header}\n[[VISION_IMAGE:{abs_path}]]\n[Image - akan dikirim via OpenAI Response input_image, hanya model muse-spark yang didukung]"
+        return f"{header}\n[[VISION_IMAGE:{abs_path}]]\n[Image - will be sent via OpenAI Response input_image, only muse-spark models supported]"
     if mime == "application/pdf" or ext == ".pdf":
-        return f"{header}\n[[INPUT_FILE:{abs_path}]]\n[PDF - akan dikirim via OpenAI Response input_file file_data, hanya model muse-spark yang didukung]"
-    # Untuk binary lain, coba base64 preview kecil tapi juga marker generic
+        return f"{header}\n[[INPUT_FILE:{abs_path}]]\n[PDF - will be sent via OpenAI Response input_file file_data, only muse-spark models supported]"
+    # For other binaries, try small base64 preview but also generic marker
     if mime.startswith("image/") or ext in (".zip",".bin",".exe",".docx",".xlsx"):
-        return f"{header}\n[[INPUT_FILE:{abs_path}]]\n[Binary - hanya didukung via Response]"
+        return f"{header}\n[[INPUT_FILE:{abs_path}]]\n[Binary - only supported via Response]"
     try:
         data = path.read_bytes()[:3000]
         b64 = base64.b64encode(data).decode("ascii")
         preview = b64[:500] + ("..." if len(data) == 3000 else "")
-        return f"{header}\n[Binary preview base64 (3000 bytes pertama): {preview}]"
+        return f"{header}\n[Binary preview base64 (first 3000 bytes): {preview}]"
     except Exception as e:
         return f"{header}\n[Binary file - error: {e}]"
 
@@ -108,26 +108,26 @@ def _has_binary_embed(text: str) -> bool:
     return bool(text and ("[[VISION_IMAGE:" in text or "[[INPUT_FILE:" in text))
 
 def expand_at_mentions(user_input: str) -> str:
-    """Deteksi @filepath di input, embed file content. Support @\"path dengan spasi\" dan @path."""
-    # Pattern: @ diikuti path tanpa spasi atau dengan quote
-    # Contoh: @README.md, @"my file.txt", @agent_core/tools.py, @/tmp/test.pdf
+    """Detect @filepath in input, embed file content. Supports @"path with spaces" and @path."""
+    # Pattern: @ followed by path without spaces or with quotes
+    # Example: @README.md, @"my file.txt", @agent_core/tools.py, @/tmp/test.pdf
     pattern = r'@(?:"([^"]+)"|\'([^\']+)\'|([^\s]+))'
     def repl(match):
         raw = match.group(1) or match.group(2) or match.group(3)
         if not raw:
             return match.group(0)
         p = pathlib.Path(raw)
-        # Jika path relatif dan tidak ada, coba relative ke cwd
+        # If path is relative and does not exist, try relative to cwd
         if not p.exists():
-            # Coba tanpa @, mungkin ada typo
-            return f"{match.group(0)} [file tidak ditemukan: {raw}]"
+            # Try without @, maybe typo
+            return f"{match.group(0)} [file not found: {raw}]"
         try:
             if p.is_dir():
                 try:
                     entries = sorted(os.listdir(p))
                     preview = ", ".join(entries[:20])
                     if len(entries) > 20:
-                        preview += f" ... (+{len(entries)-20} lagi)"
+                        preview += f" ... (+{len(entries)-20} more)"
                     return f"[Dir: {p} | {len(entries)} entries]\n{preview}"
                 except Exception as e:
                     return f"[Dir: {p} | error: {e}]"
@@ -137,43 +137,43 @@ def expand_at_mentions(user_input: str) -> str:
             try:
                 size = p.stat().st_size
                 if size > 500 * 1024:
-                    return f"[File: {p} | {size} bytes terlalu besar, gunakan tool 'read' dengan offset/limit atau grep]"
+                    return f"[File: {p} | {size} bytes too large, use 'read' tool with offset/limit or grep]"
                 text = p.read_text(encoding="utf-8", errors="ignore")
                 if len(text) > 8000:
                     return f"[File: {p} | {size} bytes, {len(text)} chars - truncated preview 8000 chars]\n{text[:8000]}\n...[truncated {len(text)-8000} chars]..."
                 return f"[File: {p} | {size} bytes]\n{text}"
             except Exception as e:
-                return f"[File: {p} | error baca: {e}]"
+                return f"[File: {p} | read error: {e}]"
         except Exception as e:
             return f"[File: {raw} | error: {e}]"
-    # Ganti semua @mentions
+    # Replace all @mentions
     expanded = re.sub(pattern, repl, user_input)
     if expanded != user_input:
-        print(f"[embed] @file terdeteksi dan di-embed", file=sys.stderr)
+        print(f"[embed] @file detected and embedded", file=sys.stderr)
     return expanded
 
 def parse_args():
-    p = argparse.ArgumentParser(description="AI Agent sederhana - tool calling + filesystem + LLM")
+    p = argparse.ArgumentParser(description="Simple AI Agent - tool calling + filesystem + LLM")
     p.add_argument("--model", "-m", default=DEFAULT_MODEL, help=f"Model id (default {DEFAULT_MODEL})")
-    p.add_argument("--session", "-s", default=None, help="Session id (ses_xxx). Jika tidak ada, buat baru")
-    p.add_argument("--once", default=None, help="Jalankan satu prompt lalu exit (non-interaktif)")
-    p.add_argument("--continue", dest="cont", action="store_true", help="Lanjutkan sesi terakhir")
-    p.add_argument("--list-models", action="store_true", help="List model dari opencode.ai lalu exit")
-    p.add_argument("--no-stream", action="store_true", help="Matikan streaming (debug)")
+    p.add_argument("--session", "-s", default=None, help="Session id (ses_xxx). If not provided, create new")
+    p.add_argument("--once", default=None, help="Run single prompt then exit (non-interactive)")
+    p.add_argument("--continue", dest="cont", action="store_true", help="Continue last session")
+    p.add_argument("--list-models", action="store_true", help="List models from opencode.ai then exit")
+    p.add_argument("--no-stream", action="store_true", help="Disable streaming (debug)")
     p.add_argument("--max-iterations", type=int, default=None, help="Override max loop iterations")
     p.add_argument("--base-url", default=None, help="Override OpenCode base URL")
-    p.add_argument("--tool-call", default="ask", choices=["accept-all", "accept-fs", "ask"], help="Mode izin tool (default ask)")
+    p.add_argument("--tool-call", default="ask", choices=["accept-all", "accept-fs", "ask"], help="Tool permission mode (default ask)")
     p.add_argument("--think", default=None, help="Thinking variant: none/low/medium/high/xhigh")
     return p.parse_args()
 
 def run_shell_direct(command: str, workdir: str = "."):
-    """Jalankan shell via ! - terminatable, streaming output."""
+    """Run shell via ! - terminatable, streaming output."""
     if not command.strip():
         print("[shell] empty command", file=sys.stderr)
         return
     print(f"[shell] $ {command}", file=sys.stderr)
     try:
-        # Gunakan Popen agar bisa di-terminate via Ctrl-C
+        # Use Popen so it can be terminated via Ctrl-C
         proc = subprocess.Popen(command, shell=True, cwd=workdir or ".")
         try:
             proc.wait()
@@ -207,67 +207,67 @@ def handle_compact(ctx: ContextManager):
         print(f"  summary preview: {preview}...", file=sys.stderr)
 
 def handle_model(arg: str, llm: LLMClient, base_url=None, loop=None, think_variant: str = "none"):
-    """arg bisa kosong (interactive), atau nama model langsung. Return think_variant baru (mungkin dimatikan jika model tidak support)."""
+    """arg can be empty (interactive), or direct model name. Return new think_variant (may be disabled if model not supported)."""
     arg = arg.strip() if arg else ""
     if arg:
         llm.model = arg
         print(f"[model] switched to {arg}", file=sys.stderr)
         if is_responses_model(arg):
-            print(f"  -> model mendukung thinking (reasoning_effort)", file=sys.stderr)
+            print(f"  -> model supports thinking (reasoning_effort)", file=sys.stderr)
         else:
-            print(f"  -> model tidak mendukung thinking (akan tampil None)", file=sys.stderr)
+            print(f"  -> model does not support thinking (will show None)", file=sys.stderr)
             if loop is not None and think_variant != "none":
-                print(f"  -> thinking {think_variant} dimatikan karena model tidak support", file=sys.stderr)
+                print(f"  -> thinking {think_variant} disabled because model not supported", file=sys.stderr)
                 loop.extra_body.pop("reasoning_effort", None)
                 loop.extra_body.pop("reasoning", None)
                 think_variant = "none"
         return think_variant
-    # interactive: fetch & pilih
+    # interactive: fetch & select
     print("Fetching models...", file=sys.stderr)
     try:
         models = fetch_models(base_url=base_url) if base_url else fetch_models()
     except Exception as e:
         print(f"Error fetch models: {e}", file=sys.stderr)
         return think_variant
-    # tampilkan SEMUA models agar pengguna dapat memilih
+    # show ALL models so user can choose
     display = models
-    print(f"Found {len(models)} models (menampilkan semua):", file=sys.stderr)
+    print(f"Found {len(models)} models (showing all):", file=sys.stderr)
     for i, m in enumerate(display, 1):
         cur = " * current" if m.get("id")==llm.model else ""
         print(f" {i:3}. {m.get('id')} ({m.get('owned_by','')}){cur}", file=sys.stderr)
-    print("Pilih model [1-{}, atau ketik nama lengkap, Enter untuk batal]: ".format(len(display)), end="", file=sys.stderr, flush=True)
+    print("Select model [1-{}, or type full name, Enter to cancel]: ".format(len(display)), end="", file=sys.stderr, flush=True)
     try:
         choice = input().strip()
     except (EOFError, KeyboardInterrupt):
-        print("\n[model] batal", file=sys.stderr)
+        print("\n[model] cancelled", file=sys.stderr)
         return think_variant
     if not choice:
-        print("[model] batal", file=sys.stderr)
+        print("[model] cancelled", file=sys.stderr)
         return think_variant
-    # coba parse angka
+    # try to parse number
     sel = None
     if choice.isdigit():
         idx = int(choice)
         if 1 <= idx <= len(display):
             sel = display[idx-1].get("id")
         else:
-            print(f"[model] nomor di luar range 1-{len(display)}", file=sys.stderr)
+            print(f"[model] number out of range 1-{len(display)}", file=sys.stderr)
             return think_variant
     else:
-        # cek apakah nama ada di models
+        # check if name exists in models
         sel = choice
-        # validasi ada di list? tetap izinkan custom
+        # validate exists in list? still allow custom
         found = any(m.get("id")==choice for m in models)
         if not found:
-            print(f"[model] warning: '{choice}' tidak ada di daftar, tetap gunakan (custom)", file=sys.stderr)
+            print(f"[model] warning: '{choice}' not in list, still using (custom)", file=sys.stderr)
     llm.model = sel
     print(f"[model] switched to {sel}", file=sys.stderr)
     if is_responses_model(sel):
-        print(f"  -> model mendukung thinking (reasoning_effort)", file=sys.stderr)
+        print(f"  -> model supports thinking (reasoning_effort)", file=sys.stderr)
     else:
-        print(f"  -> model tidak mendukung thinking (akan tampil None)", file=sys.stderr)
+        print(f"  -> model does not support thinking (will show None)", file=sys.stderr)
         if loop is not None and think_variant != "none":
-            print(f"  -> thinking {think_variant} dimatikan karena model tidak support", file=sys.stderr)
+            print(f"  -> thinking {think_variant} disabled because model not supported", file=sys.stderr)
             loop.extra_body.pop("reasoning_effort", None)
             loop.extra_body.pop("reasoning", None)
             think_variant = "none"
@@ -280,7 +280,7 @@ def handle_usage(ctx: ContextManager):
     print(f"  compactions: {u['compactions']}", file=sys.stderr)
     # detail per message estimate
     from agent_core.context import estimate_messages_tokens
-    # breakdown sistem vs recent
+    # breakdown system vs recent
     if len(ctx.messages) > 0:
         sys_tokens = estimate_messages_tokens([ctx.messages[0]])
         recent_tokens = u['tokens'] - sys_tokens
@@ -299,9 +299,9 @@ def handle_skill(arg: str):
     print(load_skill(arg), file=sys.stderr)
 
 def handle_reload(ctx: ContextManager, llm, permission_manager, think_variant):
-    """Reload state tanpa kehilangan konteks: rebuild prompt lazy, keep messages."""
+    """Reload state without losing context: rebuild prompt lazy, keep messages."""
     print("[reload] reloading state...", file=sys.stderr)
-    # Lazy: jangan load semua skills, hanya note
+    # Lazy: don't load all skills, just note
     catalog = ""  # lazy
     new_prompt = build_system_prompt(catalog)
     ctx.system_prompt = new_prompt
@@ -312,45 +312,45 @@ def handle_reload(ctx: ContextManager, llm, permission_manager, think_variant):
     print(f"  think: {think_variant}", file=sys.stderr)
     print(f"  permission: {permission_manager.status()}", file=sys.stderr)
     print(f"  tokens: {u['tokens']}/{u['max']} ({u['percent']}%) msgs={len(ctx.messages)}", file=sys.stderr)
-    print("[reload] done - konteks percakapan tetap dipertahankan", file=sys.stderr)
+    print("[reload] done - conversation context preserved", file=sys.stderr)
 
 def handle_think(arg: str, llm: LLMClient, loop: AgentLoop, current_variant: str):
     arg = arg.strip().lower() if arg else ""
     supports = is_responses_model(llm.model)
     if not arg:
-        # tampilkan daftar & current
+        # show list & current
         print(f"[think] model: {llm.model}", file=sys.stderr)
         if not supports:
-            print("  kemampuan thinking: None (model tidak mendukung reasoning_effort)", file=sys.stderr)
-            print(f"  varian tersedia: None", file=sys.stderr)
-            print(f"  current: {current_variant} (tidak berpengaruh untuk model ini)", file=sys.stderr)
+            print("  thinking capability: None (model does not support reasoning_effort)", file=sys.stderr)
+            print(f"  available variants: None", file=sys.stderr)
+            print(f"  current: {current_variant} (no effect for this model)", file=sys.stderr)
         else:
-            print(f"  kemampuan thinking: Supported (via reasoning_effort)", file=sys.stderr)
-            print(f"  varian tersedia: {', '.join(THINK_VARIANTS)}", file=sys.stderr)
-            print(f"    - none   : tanpa thinking (default)")
-            print(f"    - low    : reasoning cepat, hemat token")
-            print(f"    - medium : seimbang")
-            print(f"    - high   : mendalam, lambat & mahal")
-            print(f"    - xhigh  : ekstra mendalam, paling lambat & mahal")
+            print(f"  thinking capability: Supported (via reasoning_effort)", file=sys.stderr)
+            print(f"  available variants: {', '.join(THINK_VARIANTS)}", file=sys.stderr)
+            print(f"    - none   : without thinking (default)", file=sys.stderr)
+            print(f"    - low    : fast reasoning, token-efficient", file=sys.stderr)
+            print(f"    - medium : balanced", file=sys.stderr)
+            print(f"    - high   : deep, slow & expensive", file=sys.stderr)
+            print(f"    - xhigh  : extra deep, slowest & most expensive", file=sys.stderr)
             print(f"  current: {current_variant}", file=sys.stderr)
-            print(f"  cara pakai: /think medium  atau  /think xhigh", file=sys.stderr)
+            print(f"  usage: /think medium  or  /think xhigh", file=sys.stderr)
         return current_variant
     # set variant
     if arg not in THINK_VARIANTS:
-        print(f"[think] varian tidak valid: {arg}. Pilihan: {', '.join(THINK_VARIANTS)}", file=sys.stderr)
+        print(f"[think] invalid variant: {arg}. Choices: {', '.join(THINK_VARIANTS)}", file=sys.stderr)
         return current_variant
     if not supports and arg != "none":
-        print(f"[think] warning: model {llm.model} tidak mendukung thinking, varian '{arg}' akan diabaikan (akan tampil None)", file=sys.stderr)
-        # tetap simpan tapi tidak akan dipakai
+        print(f"[think] warning: model {llm.model} does not support thinking, variant '{arg}' will be ignored (will show None)", file=sys.stderr)
+        # still save but will not be used
     new_variant = arg
     # update loop extra_body
     if new_variant == "none":
         loop.extra_body.pop("reasoning_effort", None)
         loop.extra_body.pop("reasoning", None)
-        print(f"[think] set to none (thinking dimatikan)", file=sys.stderr)
+        print(f"[think] set to none (thinking disabled)", file=sys.stderr)
     else:
         loop.extra_body["reasoning_effort"] = new_variant
-        # pastikan tidak ada reasoning lama yang conflict
+        # ensure no old reasoning conflicts
         loop.extra_body.pop("reasoning", None)
         print(f"[think] set to {new_variant} (reasoning_effort={new_variant})", file=sys.stderr)
     return new_variant
@@ -359,13 +359,13 @@ def handle_tool_call(arg: str, pm: PermissionManager):
     arg = arg.strip().lower() if arg else ""
     if not arg:
         print(f"[tool-call] current: {pm.status()}", file=sys.stderr)
-        print("  pilihan: accept-all, accept-fs, ask", file=sys.stderr)
-        print("    accept-all : semua tool otomatis tanpa tanya")
-        print("    accept-fs  : filesystem (read/write/glob/grep) auto, bash tetap tanya")
-        print("    ask        : semua hardware konfirmasi (default)", file=sys.stderr)
+        print("  choices: accept-all, accept-fs, ask", file=sys.stderr)
+        print("    accept-all : all tools automatically without prompt", file=sys.stderr)
+        print("    accept-fs  : filesystem (read/write/glob/grep) auto, bash still prompts", file=sys.stderr)
+        print("    ask        : all require confirmation (default)", file=sys.stderr)
         return
     if arg not in ("accept-all", "accept-fs", "ask"):
-        print(f"[tool-call] mode tidak valid: {arg}. Pilihan: accept-all, accept-fs, ask", file=sys.stderr)
+        print(f"[tool-call] invalid mode: {arg}. Choices: accept-all, accept-fs, ask", file=sys.stderr)
         return
     pm.set_mode(arg)
     print(f"[tool-call] mode -> {pm.status()}", file=sys.stderr)
@@ -389,7 +389,7 @@ def main():
         print("Fetching models from opencode.ai...", file=sys.stderr)
         try:
             models = fetch_models(base_url=args.base_url) if args.base_url else fetch_models()
-            print(f"Found {len(models)} models (semua):")
+            print(f"Found {len(models)} models (all):")
             for m in models:
                 print(f" - {m.get('id')}  ({m.get('owned_by','')})")
         except Exception as e:
@@ -414,9 +414,9 @@ def main():
         if not session_id.startswith("ses_"):
             session_id = f"ses_{session_id}"
 
-    # Build context - lazy skill/tool loading: jangan load semua skill di awal
-    # Hanya beri tahu LLM bahwa skills tersedia via skill_list/skill_load, tidak inject katalog penuh
-    catalog = ""  # lazy, tidak load di awal
+    # Build context - lazy skill/tool loading: don't load all skills at startup
+    # Only tell LLM that skills are available via skill_list/skill_load, don't inject full catalog
+    catalog = ""  # lazy, don't load at startup
     system_prompt = build_system_prompt(catalog)
 
     ctx = ContextManager(system_prompt=system_prompt)
@@ -441,25 +441,25 @@ def main():
     # Permission manager
     pm = PermissionManager(mode=args.tool_call)
 
-    # Thinking variant - awal dari CLI
+    # Thinking variant - initial from CLI
     think_variant = args.think.lower().strip() if args.think else DEFAULT_THINK
-    # Jika resume session, coba pakai model & think terakhir dari history (sesuai instruksi)
+    # If resuming session, try to use last model & think from history (per instructions)
     if args.session or args.cont:
         try:
             last_model, last_think = get_last_model_and_think(session_id)
             if last_model:
                 if last_model != llm.model:
-                    print(f"[history] menggunakan model terakhir dari session: {last_model} (CLI: {llm.model})", file=sys.stderr)
+                    print(f"[history] using last model from session: {last_model} (CLI: {llm.model})", file=sys.stderr)
                     llm.model = last_model
             if last_think:
-                # last_think dari history bisa "none" atau varian
+                # last_think from history can be "none" or variant
                 if last_think != think_variant:
-                    # Jika CLI tidak eksplisit (args.think is None) atau history berbeda, pakai history sebagai sumber kebenaran terakhir
-                    # Karena history menyimpan yang benar-benar dipakai terakhir, kita prioritaskan history
-                    print(f"[history] menggunakan thinking terakhir: {last_think} (CLI: {think_variant})", file=sys.stderr)
+                    # If CLI not explicit (args.think is None) or history differs, use history as last source of truth
+                    # Because history stores what was actually used last, we prioritize history
+                    print(f"[history] using last thinking: {last_think} (CLI: {think_variant})", file=sys.stderr)
                     think_variant = last_think
         except Exception as e:
-            print(f"[history] gagal load last model/think: {e}", file=sys.stderr)
+            print(f"[history] failed to load last model/think: {e}", file=sys.stderr)
 
     extra_body = {}
     if think_variant and think_variant != "none":
@@ -467,7 +467,7 @@ def main():
             extra_body["reasoning_effort"] = think_variant
         else:
             if think_variant != "none":
-                print(f"[warning] model {llm.model} tidak support thinking, variant '{think_variant}' diabaikan", file=sys.stderr)
+                print(f"[warning] model {llm.model} does not support thinking, variant '{think_variant}' ignored", file=sys.stderr)
                 think_variant = "none"
     loop = AgentLoop(llm=llm, context=ctx, session_id=session_id, permission_manager=pm, extra_body=extra_body, **loop_kwargs)
 
@@ -478,20 +478,20 @@ def main():
     if catalog:
         print(f"Skills loaded: {catalog.count(chr(10))+1} skill(s)", file=sys.stderr)
     print(f"Permission: {pm.status()} | Think: {think_variant}", file=sys.stderr)
-    print("Ketik pesan, Enter untuk kirim. /help untuk bantuan, /exit untuk keluar.", file=sys.stderr)
-    print("Tip: !<command> untuk shell, /tool-call untuk izin, /think untuk reasoning", file=sys.stderr)
+    print("Type message, Enter to send. /help for help, /exit to quit.", file=sys.stderr)
+    print("Tip: !<command> for shell, /tool-call for permissions, /think for reasoning", file=sys.stderr)
     print("", file=sys.stderr)
 
     if args.once:
-        # Expand @file sebelum kirim ke loop
+        # Expand @file before sending to loop
         expanded_once = expand_at_mentions(args.once)
         print(f"> {args.once}", file=sys.stderr)
         if expanded_once != args.once:
             print(f"[expanded] {expanded_once[:500]}...", file=sys.stderr)
-        # Jika ada binary file diembed dan bukan Response model -> tolak
+        # If binary file is embedded and not Response model -> reject
         if _has_binary_embed(expanded_once) and not is_responses_model(llm.model):
-            print("Model tidak didukung - binary file hanya didukung via OpenAI Response API (gunakan model muse-spark-1.2/1.3)", file=sys.stderr)
-            print("Model tidak didukung", file=sys.stdout)
+            print("Model not supported - binary files only supported via OpenAI Response API (use model muse-spark-1.2/1.3)", file=sys.stderr)
+            print("Model not supported", file=sys.stdout)
             return
         try:
             answer = loop.run(expanded_once, stream=stream)
@@ -508,7 +508,7 @@ def main():
             print("\n[exit EOF]", file=sys.stderr)
             break
         except KeyboardInterrupt:
-            print("\n[interrupted, ketik /exit untuk keluar]", file=sys.stderr)
+            print("\n[interrupted, type /exit to quit]", file=sys.stderr)
             continue
 
         if not user_input.strip():
@@ -516,7 +516,7 @@ def main():
 
         stripped = user_input.strip()
 
-        # Shell escape ! (harus bisa diterminate)
+        # Shell escape ! (must be terminatable)
         if stripped.startswith("!"):
             shell_cmd = stripped[1:].strip()
             if not shell_cmd:
@@ -525,7 +525,7 @@ def main():
             run_shell_direct(shell_cmd)
             continue
 
-        # Command parsing - urutan penting, yang pakai arg dulu
+        # Command parsing - order matters, those with args first
         low = stripped.lower()
 
         # /compact
@@ -536,7 +536,7 @@ def main():
         # /model /models
         if low.startswith("/model"):
             # /model, /models, /model xxx, /models xxx
-            # ambil arg setelah spasi
+            # get arg after space
             if low.startswith("/models"):
                 arg = stripped[7:].strip()  # len /models =7
             else:  # /model
@@ -555,10 +555,10 @@ def main():
             if low.startswith("/skills"):
                 arg = stripped[7:].strip()
             else:  # /skill
-                # handle /skill vs /skills sudah, tapi cek juga spasi
+                # handle /skill vs /skills done, but also check spaces
                 # len /skill =6
                 arg = stripped[6:].strip()
-                # jika low == "/skill" tanpa arg -> list, jika "/skill xxx" -> load
+                # if low == "/skill" without arg -> list, if "/skill xxx" -> load
             handle_skill(arg)
             continue
 
@@ -575,7 +575,7 @@ def main():
 
         # /tool-call
         if low.startswith("/tool-call") or low.startswith("/toolcall"):
-            # support dash atau tidak
+            # support dash or not
             if low.startswith("/tool-call"):
                 arg = stripped[10:].strip()  # len /tool-call =10
             else:
@@ -595,20 +595,20 @@ def main():
         if low == "/help":
             print("""
 Commands:
-  /help                  tampilkan bantuan
-  /compact               paksa kompaksi context
-  /model [name]          lihat daftar model & pilih (alias /models)
-  /usage                 lihat penggunaan token (alias /usages, /tokens)
-  /skill [name]          lihat daftar skill / load skill (alias /skills)
-  /reload                reload state tanpa kehilangan konteks
-  /think [variant]       lihat/pilih thinking: none/low/medium/high/xhigh (None jika model tidak support)
-  /tool-call [mode]      izin tool: accept-all, accept-fs, ask
-  /info                  tampilkan model, token, panjang chat
-  @nama_file             embed file ke prompt (text/pdf/foto), cth: @README.md @\"foto.jpg\" @doc.pdf
-  !<command>             jalankan shell langsung (Ctrl-C untuk terminate)
-  /clear                 bersihkan context (reset)
-  /session               tampilkan session id
-  /exit, /quit           keluar
+  /help                  show help
+  /compact               force context compaction
+  /model [name]          view model list & select (alias /models)
+  /usage                 view token usage (alias /usages, /tokens)
+  /skill [name]          view skill list / load skill (alias /skills)
+  /reload                reload state without losing context
+  /think [variant]       view/select thinking: none/low/medium/high/xhigh (None if model not supported)
+  /tool-call [mode]      tool permission: accept-all, accept-fs, ask
+  /info                  show model, token, chat length
+  @file_name             embed file into prompt (text/pdf/photo), e.g.: @README.md @"photo.jpg" @doc.pdf
+  !<command>             run shell directly (Ctrl-C to terminate)
+  /clear                 clear context (reset)
+  /session               show session id
+  /exit, /quit           quit
 """, file=sys.stderr)
             continue
         if low == "/clear":
@@ -621,18 +621,18 @@ Commands:
             print(f"session: {session_id}", file=sys.stderr)
             print(f"model: {llm.model} | think: {think_variant} | permission: {pm.status()}", file=sys.stderr)
             continue
-        # fallback /models lama etc sudah di-handle di atas
+        # fallback old /models etc already handled above
 
-        # Expand @file sebelum kirim (embed file + handle binary)
+        # Expand @file before sending (embed file + handle binary)
         expanded = expand_at_mentions(user_input)
         if expanded != user_input:
-            print(f"[embed] file di-embed ke prompt ({len(expanded)} chars)", file=sys.stderr)
-        # Jika ada binary file diembed dan bukan Response model -> tolak
+            print(f"[embed] file embedded into prompt ({len(expanded)} chars)", file=sys.stderr)
+        # If binary file is embedded and not Response model -> reject
         if _has_binary_embed(expanded) and not is_responses_model(llm.model):
-            print("Model tidak didukung - binary file hanya didukung via OpenAI Response API (gunakan model muse-spark-1.2/1.3)", file=sys.stderr)
-            print("Model tidak didukung")
+            print("Model not supported - binary files only supported via OpenAI Response API (use model muse-spark-1.2/1.3)", file=sys.stderr)
+            print("Model not supported")
             continue
-        # Kirim ke agent loop
+        # Send to agent loop
         try:
             loop.run(expanded, stream=stream)
         except KeyboardInterrupt:

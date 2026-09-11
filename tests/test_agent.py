@@ -5,7 +5,7 @@ import tempfile
 import unittest
 import sys
 
-# pastikan import agent_core
+# ensure import agent_core
 sys.path.insert(0, str(pathlib.Path(__file__).parent.parent))
 
 from agent_core.llm import base_model_id, is_responses_model, generate_session_id, generate_request_id
@@ -43,29 +43,29 @@ class TestContextManager(unittest.TestCase):
 
     def test_add_and_compact(self):
         ctx = ContextManager(system_prompt="system", max_tokens=200, keep_recent=2)
-        # tokens awal kecil
+        # initial tokens small
         self.assertEqual(len(ctx.messages), 1)
-        # tambah banyak pesan hingga trigger compaction
+        # add many messages to trigger compaction
         for i in range(10):
             ctx.add_user("hello " + "x"*100)
             ctx.add_assistant("reply " + "y"*100)
-        # paksa compact
+        # force compact
         msgs = ctx.get_messages(force_compact=True)
-        # harus tetap ada system di depan
+        # system must still be at the front
         self.assertEqual(msgs[0]["role"], "system")
-        # harus ada compaction note
+        # must have compaction note
         self.assertIn("COMPACTED", msgs[1]["content"])
         # recent keep 2
         self.assertEqual(len(msgs), 1 + 1 + 2)  # system + summary + 2 recent
 
     def test_truncate_tool_output(self):
-        # Truncate cerdas - hemat tapi pertahankan head+tail
+        # Smart truncate - save space but keep head+tail
         ctx = ContextManager(system_prompt="sys", max_tokens=100000)
         big = "a"* (MAX_TOOL_OUTPUT_CHARS + 5000)
         ctx.add_tool_result("call_1", "bash", big)
         last = ctx.messages[-1]
         self.assertLess(len(last["content"]), len(big))
-        self.assertIn("TRUNCATED cerdas", last["content"])
+        self.assertIn("TRUNCATED", last["content"])
         self.assertLessEqual(len(last["content"]), MAX_TOOL_OUTPUT_CHARS + 100)
 
     def test_token_usage(self):
@@ -124,7 +124,7 @@ class TestTools(unittest.TestCase):
         out = tool_bash("echo hello", workdir=str(self.base))
         self.assertIn("hello", out)
         out2 = tool_bash("invalid_command_zzz_123", workdir=str(self.base))
-        # harus tetap ada exit code
+        # must still have exit code
         self.assertIn("exit", out2.lower())
 
     def test_execute_tool_json_string(self):
@@ -135,17 +135,17 @@ class TestTools(unittest.TestCase):
         self.assertIn("hi", res2)
         # unknown tool
         err = execute_tool("unknown_xyz", "{}")
-        self.assertIn("tidak dikenal", err)
+        self.assertIn("unknown", err.lower())
 
 class TestSkills(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.base = pathlib.Path(self.tmp.name) / ".agent" / "skills"
         self.base.mkdir(parents=True)
-        # buat skill dummy
+        # create dummy skill
         sdir = self.base / "demo"
         sdir.mkdir()
-        (sdir / "SKILL.md").write_text("# Demo\nIni skill demo untuk testing\n", encoding="utf-8")
+        (sdir / "SKILL.md").write_text("# Demo\nThis is a demo skill for testing\n", encoding="utf-8")
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -161,7 +161,7 @@ class TestSkills(unittest.TestCase):
         loaded = load_skill("demo", str(self.base))
         self.assertIn("Demo", loaded)
         err = load_skill("missing", str(self.base))
-        self.assertIn("tidak ditemukan", err)
+        self.assertIn("not found", err.lower())
 
     def test_catalog(self):
         cat = build_skills_catalog(str(self.base))
@@ -189,7 +189,7 @@ class TestHistory(unittest.TestCase):
         save_message(self.sid, {"role": "user", "content": "test"}, str(self.hdir))
         self.assertEqual(len(load_history(self.sid, str(self.hdir))), 1)
 
-# Mock LLM untuk test AgentLoop tanpa network
+# Mock LLM for testing AgentLoop without network
 class MockLLM:
     def __init__(self, responses, model="mimo-v2.5-free"):
         # responses: list of dicts {content, tool_calls}
@@ -220,43 +220,43 @@ class TestAgentLoop(unittest.TestCase):
     def test_simple_no_tools(self):
         from agent_core.prompts import build_system_prompt
         ctx = ContextManager(system_prompt=build_system_prompt())
-        mock = MockLLM([{"content": "halo dunia", "tool_calls": None, "finish_reason": "stop"}])
+        mock = MockLLM([{"content": "hello world", "tool_calls": None, "finish_reason": "stop"}])
         sid = hist_sid()
-        # patch history dir via monkey? AgentLoop pakai global HISTS_DIR, jadi kita override save_message path?
-        # workaround: set HIDS_DIR env? Simpler: biarkan pakai default .agent/hists, tapi kita cek loop logic saja
-        # Kita buat AgentLoop dan override history save dengan no-op via monkey patch
+        # patch history dir via monkey? AgentLoop uses global HISTS_DIR, so we override save_message path?
+        # workaround: set HISTS_DIR env? Simpler: let it use default .agent/hists, but we only check loop logic
+        # We create AgentLoop and override history save with no-op via monkey patch
         import agent_core.history as hist_mod
         orig = hist_mod.HISTS_DIR
         hist_mod.HISTS_DIR = str(self.hdir)
         try:
             loop = AgentLoop(llm=mock, context=ctx, session_id=sid, verbose=False)
             ans = loop.run("hi", stream=False)
-            self.assertEqual(ans, "halo dunia")
+            self.assertEqual(ans, "hello world")
             self.assertEqual(len(mock.calls), 1)
-            # history tersimpan
+            # history saved
             self.assertGreater(len(load_history(sid, str(self.hdir))), 0)
         finally:
             hist_mod.HISTS_DIR = orig
 
     def test_tool_calling_loop(self):
-        # Buat file untuk dibaca via tool
+        # Create file to be read via tool
         f = self.base / "data.txt"
         f.write_text("secret 123", encoding="utf-8")
         ctx = ContextManager(system_prompt="system")
-        # Mock: pertama minta tool read, kedua jawab final
+        # Mock: first requests read tool, second returns final answer
         mock = MockLLM([
             {"content": "", "tool_calls": [{"id": "call_1", "type":"function","function":{"name":"read","arguments": json.dumps({"filePath": str(f)})}}], "finish_reason":"tool_calls"},
-            {"content": "isi file adalah secret 123", "tool_calls": None, "finish_reason":"stop"}
+            {"content": "file content is secret 123", "tool_calls": None, "finish_reason":"stop"}
         ])
         import agent_core.history as hist_mod
         orig = hist_mod.HISTS_DIR
         hist_mod.HISTS_DIR = str(self.hdir)
         try:
             loop = AgentLoop(llm=mock, context=ctx, session_id=hist_sid(), verbose=False)
-            ans = loop.run("baca file data.txt", stream=False)
+            ans = loop.run("read file data.txt", stream=False)
             self.assertIn("secret 123", ans)
             self.assertEqual(len(mock.calls), 2)
-            # context harus punya tool result
+            # context must have tool result
             roles = [m["role"] for m in ctx.messages]
             self.assertIn("tool", roles)
         finally:
@@ -264,7 +264,7 @@ class TestAgentLoop(unittest.TestCase):
 
     def test_max_iterations(self):
         ctx = ContextManager(system_prompt="sys")
-        # selalu minta tool, tak pernah selesai
+        # always requests tool, never finishes
         mock = MockLLM([
             {"content": "", "tool_calls": [{"id":"c1","type":"function","function":{"name":"bash","arguments": json.dumps({"command":"echo hi"})}}], "finish_reason":"tool_calls"}
         ] * 5)
@@ -274,7 +274,7 @@ class TestAgentLoop(unittest.TestCase):
         try:
             loop = AgentLoop(llm=mock, context=ctx, session_id=hist_sid(), max_iterations=3, verbose=False)
             ans = loop.run("loop", stream=False)
-            # harus berhenti di max iter, dan ada tool calls 3 kali
+            # must stop at max iter, and have 3 tool calls
             self.assertEqual(len(mock.calls), 3)
         finally:
             hist_mod.HISTS_DIR = orig
@@ -297,7 +297,7 @@ class TestPermissions(unittest.TestCase):
         self.assertFalse(pm.is_auto_allowed("bash"))
 
     def test_permission_gate_loop(self):
-        # Test loop menghormati deny
+        # Test loop respects deny
         from agent_core.permissions import PermissionManager
         pm = PermissionManager("ask")
         # monkey patch prompt to deny
@@ -317,10 +317,10 @@ class TestPermissions(unittest.TestCase):
         hist_mod.HISTS_DIR = tmp.name
         try:
             loop = AgentLoop(llm=mock, context=ctx, session_id=hist_sid(), verbose=False, permission_manager=pm)
-            ans = loop.run("baca", stream=False)
-            # tool harus DENIED, loop tetap lanjut dan final answer ada
+            ans = loop.run("read", stream=False)
+            # tool must be DENIED, loop still continues and final answer exists
             self.assertIn("denied handled", ans)
-            # cek ada tool result DENIED di context
+            # check there is DENIED tool result in context
             tool_msgs = [m for m in ctx.messages if m.get("role")=="tool"]
             self.assertTrue(any("DENIED" in m.get("content","") for m in tool_msgs))
         finally:
@@ -352,7 +352,7 @@ class TestPermissions(unittest.TestCase):
             tmp.cleanup()
 
     def test_escape_cancels_response(self):
-        # Simulasi escape (Ctrl-C) saat llm.chat dipanggil
+        # Simulate escape (Ctrl-C) when llm.chat is called
         class MockLLMEscape:
             model = "mimo-v2.5-free"
             def chat(self, *a, **kw):
@@ -366,21 +366,21 @@ class TestPermissions(unittest.TestCase):
             loop = AgentLoop(llm=MockLLMEscape(), context=ctx, session_id=hist_sid(), verbose=False)
             ans = loop.run("hi", stream=True)
             self.assertIn("cancelled", ans.lower())
-            # Pastikan tidak ada assistant message "cancelled" disimpan sebagai error, tapi sebagai cancelled
+            # Ensure no assistant message "cancelled" is saved as error, but as cancelled
             raw = hist_mod.load_history(loop.session_id)
-            # history harus hanya user, tidak ada assistant yang error panjang, tapi ada cancelled?
-            # Kita cek bahwa assistant tidak disimpan sebagai err, tapi loop mengembalikan cancelled tanpa simpan partial
-            # Saat ini loop mengembalikan [cancelled] tanpa save ke history (hanya user), cek
+            # history must be only user, no long error assistant, but has cancelled?
+            # We check that assistant is not saved as err, but loop returns cancelled without saving partial
+            # Currently loop returns [cancelled] without save to history (only user), check
             self.assertTrue(any(r.get("role")=="user" for r in raw))
-            # assistant cancelled tidak disimpan sebagai tool, tapi sebagai return value saja
-            # Pastikan tidak ada "LLM error" di history
+            # assistant cancelled not saved as tool, but as return value only
+            # Ensure no "LLM error" in history
             self.assertFalse(any("LLM error" in r.get("content","") for r in raw))
         finally:
             hist_mod.HISTS_DIR = orig
             tmp.cleanup()
 
     def test_provider_log_not_shown(self):
-        # Pastikan [provider] using tidak tampil di stderr pada success (mengganggu)
+        # Ensure [provider] using does not appear on stderr on success (noisy)
         from agent_core.llm import LLMClient
         import urllib.request, json, io, sys
         from io import StringIO
@@ -453,7 +453,7 @@ class TestCommands(unittest.TestCase):
 
     def test_skill_handlers(self):
         from agent import handle_skill
-        # buat temp skill dir
+        # create temp skill dir
         tmp = tempfile.TemporaryDirectory()
         base = pathlib.Path(tmp.name) / ".agent" / "skills" / "demo"
         base.mkdir(parents=True)
@@ -480,8 +480,8 @@ class TestCommands(unittest.TestCase):
         v = handle_think("", llm, loop, "none")
         self.assertEqual(v, "none")
         v2 = handle_think("medium", llm, loop, "none")
-        # mimo tidak support, tetap none tapi warn
-        # set ke muse-spark
+        # mimo not supported, stays none but warns
+        # set to muse-spark
         llm.model = "muse-spark-1.2-contributor-free"
         v3 = handle_think("medium", llm, loop, "none")
         self.assertEqual(v3, "medium")
@@ -566,7 +566,7 @@ class TestProviders(unittest.TestCase):
 
     def test_prepare_payload_anthropic(self):
         from agent_core.providers import prepare_payload_for_provider, ProviderSpec
-        # fallback hanya ke opencode, jadi base harus opencode.ai/zen/v1
+        # fallback only to opencode, so base must be opencode.ai/zen/v1
         p = ProviderSpec("opencode_anthropic", "https://opencode.ai", "/zen/v1/messages", "anthropic")
         msgs = [{"role":"system","content":"sys"},{"role":"user","content":"hi"}]
         body = prepare_payload_for_provider(p, "claude-3", msgs, None, None, False)
@@ -588,13 +588,13 @@ class TestProviders(unittest.TestCase):
 
     def test_prepare_payload_responses(self):
         from agent_core.providers import prepare_payload_for_provider, ProviderSpec
-        # Sesuai SDK-example sec 2: input + instructions + store:false
+        # Per SDK-example sec 2: input + instructions + store:false
         p = ProviderSpec("opencode_responses", "https://opencode.ai", "/zen/v1/responses", "openai_responses")
         msgs = [
             {"role":"system","content":"You are helpful"},
-            {"role":"user","content":"Halo"},
-            {"role":"assistant","content":"Halo! Ada yang bisa saya bantu?"},
-            {"role":"user","content":"Jelaskan REST API."}
+            {"role":"user","content":"Hello"},
+            {"role":"assistant","content":"Hello! How can I help you?"},
+            {"role":"user","content":"Explain REST API."}
         ]
         body = prepare_payload_for_provider(p, "gpt-5.6-luna", msgs, None, None, False)
         self.assertEqual(body["model"], "gpt-5.6-luna")
@@ -620,7 +620,7 @@ class TestProviders(unittest.TestCase):
         cands3 = build_candidate_providers("mimo-v2.5-free")
         self.assertEqual(cands3[0].sdk, "openai_chat")
         self.assertIn("/zen/v1/chat/completions", cands3[0].endpoint)
-        # semua candidates harus hanya opencode.ai/zen/v1
+        # all candidates must be only opencode.ai/zen/v1
         for cand in cands + cands2 + cands3:
             self.assertIn("opencode.ai/zen/v1", cand.url)
 
@@ -652,7 +652,7 @@ class TestProviders(unittest.TestCase):
         from agent_core.llm import LLMClient
         from agent_core.providers import ProviderSpec
         import urllib.error, json, io
-        # Mock urlopen to fail first provider (opencode_chat) then succeed second (opencode_responses) - hanya fallback ke opencode.ai/zen/v1
+        # Mock urlopen to fail first provider (opencode_chat) then succeed second (opencode_responses) - only fallback to opencode.ai/zen/v1
         orig_urlopen = urllib.request.urlopen
         call_count = {"n":0}
         def fake_urlopen(req, timeout=120):
@@ -660,10 +660,10 @@ class TestProviders(unittest.TestCase):
             url = req.full_url if hasattr(req, 'full_url') else str(req)
             # first call fail with 404
             if call_count["n"] == 1:
-                # Pastikan fallback hanya ke opencode
+                # Ensure fallback only to opencode
                 self.assertIn("opencode.ai/zen/v1", url)
                 raise urllib.error.HTTPError(url, 404, "Not Found", {}, io.BytesIO(b'{"error":"not found"}'))
-            # second succeed - bisa chat atau responses, keduanya di opencode
+            # second succeed - can be chat or responses, both on opencode
             self.assertIn("opencode.ai/zen/v1", url)
             fake_resp = io.BytesIO(json.dumps({"choices":[{"message":{"content":"fallback success","tool_calls":None},"finish_reason":"stop"}]}).encode())
             # mock context manager
@@ -715,7 +715,7 @@ class TestProviders(unittest.TestCase):
         hist_mod.HISTS_DIR = tmp.name
         try:
             sid = generate_session_id()
-            # simpan OpenAI format
+            # save OpenAI format
             save_message(sid, {"role":"user","content":"hello"})
             save_message(sid, {"role":"assistant","content":"hi","tool_calls":[{"id":"c1","type":"function","function":{"name":"read","arguments":"{}"}}]})
             save_message(sid, {"role":"tool","tool_call_id":"c1","name":"read","content":"data"})
@@ -723,12 +723,12 @@ class TestProviders(unittest.TestCase):
             self.assertEqual(msgs[0]["role"], "user")
             self.assertEqual(msgs[1]["tool_calls"][0]["function"]["name"], "read")
             self.assertEqual(msgs[2]["role"], "tool")
-            # Konversi saat request anthropic harus tidak merubah history
+            # Conversion during anthropic request must not modify history
             from agent_core.providers import openai_messages_to_anthropic
             system, anth = openai_messages_to_anthropic(msgs)
-            # history tetap OpenAI
+            # history stays OpenAI
             self.assertEqual(msgs[0]["content"], "hello")
-            # anthropic hasil berbeda
+            # anthropic result differs
             self.assertTrue(any(m["role"]=="user" for m in anth))
         finally:
             hist_mod.HISTS_DIR = orig
@@ -737,7 +737,7 @@ class TestProviders(unittest.TestCase):
     def test_anthropic_streaming_parse(self):
         from agent_core.llm import LLMClient
         import urllib.request, urllib.error, json, io
-        # Buat fake anthropic SSE streaming: text + tool_use
+        # Create fake anthropic SSE streaming: text + tool_use
         chunks = [
             b'event: message_start\ndata: {"type":"message_start","message":{"id":"msg_1"}}\n\n',
             b'event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}\n\n',
@@ -762,7 +762,7 @@ class TestProviders(unittest.TestCase):
                 idx["i"] += len(chunk)
                 return chunk
         def fake_urlopen(req, timeout=120):
-            # Pastikan ini adalah anthropic provider
+            # Ensure this is anthropic provider
             self.assertIn("anthropic", req.full_url if hasattr(req, 'full_url') else "")
             return FakeResp()
         # patch
@@ -774,14 +774,14 @@ class TestProviders(unittest.TestCase):
         prov_mod.PROVIDER_STATE_FILE = tmp.name
         urllib.request.urlopen = fake_urlopen
         try:
-            # Buat client dengan model anthropic, paksa hanya satu candidate anthropic agar tidak fallback
+            # Create client with anthropic model, force only one anthropic candidate so it doesn't fallback
             client = LLMClient(model="claude-sonnet-4")
-            # Monkey patch build_candidate_providers untuk hanya return anthropic
+            # Monkey patch build_candidate_providers to only return anthropic
             orig_build = prov_mod.build_candidate_providers
             def only_anthropic(m,b=None):
                 return [prov_mod.ProviderSpec("anthropic","https://api.anthropic.com","/v1/messages","anthropic")]
             prov_mod.build_candidate_providers = only_anthropic
-            # juga patch di llm module
+            # also patch in llm module
             import agent_core.llm as llm_mod
             orig_build_llm = llm_mod.build_candidate_providers
             llm_mod.build_candidate_providers = only_anthropic
@@ -891,9 +891,9 @@ class TestProviders(unittest.TestCase):
             res = client.chat([{"role":"user","content":"hi"}], stream=False)
             self.assertEqual(res["content"], "retry success")
             self.assertEqual(call_count["n"], 3)
-            # cek wait: 5 untuk attempt1, 8 untuk attempt2
+            # check wait: 5 for attempt1, 8 for attempt2
             self.assertEqual(sleep_calls, [5, 8])
-            # tidak fallback, tetap provider sama
+            # no fallback, still same provider
             saved = prov_mod.get_saved_provider("mimo-v2.5-free")
             self.assertEqual(saved["provider"], "openai_chat")
         finally:
@@ -916,8 +916,8 @@ class TestProviders(unittest.TestCase):
         def fake_urlopen(req, timeout=120):
             call_count["n"] += 1
             url = req.full_url if hasattr(req, 'full_url') else str(req)
-            # untuk provider pertama (opencode_chat), selalu 429 selama 5 kali
-            # untuk provider kedua (opencode_responses), sukses
+            # for first provider (opencode_chat), always 429 for 5 times
+            # for second provider (opencode_responses), success
             if "chat/completions" in url:
                 raise urllib.error.HTTPError(url, 429, "Too Many Requests", {}, io.BytesIO(b'{"error":"rate"}'))
             else:
@@ -948,9 +948,9 @@ class TestProviders(unittest.TestCase):
             llm_mod.build_candidate_providers = two_cands
             res = client.chat([{"role":"user","content":"hi"}], stream=False)
             self.assertEqual(res["content"], "fallback after 429")
-            # harus retry 5 kali untuk chat (4 sleeps: 5,8,11,14) lalu fallback ke responses
+            # must retry 5 times for chat (4 sleeps: 5,8,11,14) then fallback to responses
             self.assertEqual(sleep_calls, [5, 8, 11, 14])
-            self.assertEqual(call_count["n"], 6)  # 5 gagal chat + 1 sukses responses
+            self.assertEqual(call_count["n"], 6)  # 5 failed chat + 1 success responses
             saved = prov_mod.get_saved_provider("mimo-v2.5-free")
             self.assertEqual(saved["provider"], "openai_responses")
         finally:
@@ -976,11 +976,11 @@ class TestProviders(unittest.TestCase):
             last_model, last_think = get_last_model_and_think(sid)
             self.assertEqual(last_model, "muse-spark-1.2-contributor-free")
             self.assertEqual(last_think, "xhigh")
-            # cek load_messages tetap filter model
+            # check load_messages still filters model
             from agent_core.history import load_messages
             msgs = load_messages(sid)
             self.assertEqual(len(msgs), 3)
-            # raw history harus ada model
+            # raw history must have model
             raw = load_history(sid)
             self.assertEqual(raw[1].get("model"), "mimo-v2.5-free")
             self.assertEqual(raw[1].get("think_variant"), "medium")
@@ -1001,7 +1001,7 @@ class TestProviders(unittest.TestCase):
             loop = AgentLoop(llm=mock, context=ctx, session_id=sid, verbose=False, extra_body={"reasoning_effort":"high"})
             loop.run("hi", stream=False)
             raw = load_history(sid)
-            # cari assistant entry
+            # find assistant entry
             assistant_entries = [r for r in raw if r.get("role")=="assistant"]
             self.assertTrue(len(assistant_entries) > 0)
             self.assertEqual(assistant_entries[-1].get("model"), "muse-spark-1.2-contributor-free")
@@ -1027,7 +1027,7 @@ class TestProviders(unittest.TestCase):
             last_model, last_think = get_last_model_and_think(sid)
             self.assertEqual(last_model, "muse-spark-1.2-contributor-free")
             self.assertEqual(last_think, "xhigh")
-            # simulasi agent load: llm default mimo, tapi harus override ke history
+            # simulate agent load: llm default mimo, but must override to history
             llm = llm_mod.LLMClient(model="mimo-v2.5-free", session_id=sid)
             think_variant = "none"
             # mimic agent.py logic

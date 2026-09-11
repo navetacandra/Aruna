@@ -1,27 +1,27 @@
 ---
 name: example
-description: Contoh skill - panduan untuk tugas umum
+description: Example skill - guide for common tasks
 ---
 
 # Example Skill
 
-Skill ini adalah contoh bagaimana agent dapat menggunakan panduan dari `.agent/skills`.
+This skill is an example of how the agent can use guides from `.agent/skills`.
 
-## Kapan digunakan
-- Saat user meminta contoh penggunaan skill
-- Untuk demonstrasi loading skill via `skill_load`
+## When to use
+- When the user asks for an example of skill usage
+- To demonstrate skill loading via `skill_load`
 
-## Instruksi untuk Agent
-1. Jika user bertanya tentang skill, panggil `skill_list` untuk melihat katalog.
-2. Panggil `skill_load` dengan nama skill untuk mendapatkan detail.
-3. Ikuti panduan di SKILL.md ini langkah demi langkah.
-4. Selalu verifikasi hasil dengan tool `read` / `bash` sebelum menjawab.
+## Instructions for Agent
+1. If the user asks about skills, call `skill_list` to see the catalog.
+2. Call `skill_load` with the skill name to get details.
+3. Follow the guide in this SKILL.md step by step.
+4. Always verify results with `read` / `bash` tools before answering.
 
-## Contoh workflow
-1. `skill_list` -> lihat ada skill `example`
-2. `skill_load` name=example -> baca panduan ini
-3. Eksekusi tugas sesuai panduan
+## Example workflow
+1. `skill_list` -> see skill `example` exists
+2. `skill_load` name=example -> read this guide
+3. Execute task per guide
 
-## Catatan
-Tambahkan skill baru dengan membuat folder `.agent/skills/<nama>/SKILL.md`.
-Format SKILL.md bebas, tapi usahakan sertakan `name` dan `description` di frontmatter.
+## Notes
+Add a new skill by creating a folder `.agent/skills/<name>/SKILL.md`.
+SKILL.md format is free, but try to include `name` and `description` in the frontmatter.
