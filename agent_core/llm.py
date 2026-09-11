@@ -6,6 +6,7 @@ Mengacu pada opencode.js: zen/v1/chat/completions & zen/v1/responses + Anthropic
 """
 import json
 import re
+import time
 import uuid
 import urllib.request
 import urllib.error
@@ -88,34 +89,53 @@ class LLMClient:
         last_exc: Optional[Exception] = None
 
         for provider in candidates:
-            try:
-                result = self._chat_with_provider(provider, messages, tools, extra_body, stream, on_delta, on_tool_delta, timeout)
-                # simpan state sukses untuk model yang sama (akan dipakai lagi)
+            # Untuk 429, retry same provider hingga 5 kali dengan backoff 5 + (n-1)*3
+            # Jika 429, jangan fallback ke SDK lain dulu, cek dulu karena bukan kesalahan format
+            for attempt in range(1, 6):
                 try:
-                    update_provider_state(self.model, provider.sdk, provider.endpoint, provider.base_url)
-                    print(f"[provider] using {provider.sdk} {provider.url} for {self.model}", file=sys.stderr)
-                except:
-                    pass
-                return result
-            except urllib.error.HTTPError as e:
-                body_txt = ""
-                try:
-                    if e.fp:
-                        body_txt = e.read().decode("utf-8", errors="ignore")
-                except:
-                    pass
-                msg = f"HTTP {e.code}: {body_txt[:500]}"
-                # Semua HTTP error coba fallback ke provider lain (termasuk 401 auth jika ada fallback)
-                _wrapped = RuntimeError(f"Provider {provider.name} {provider.url} failed {msg}")
-                _wrapped.__cause__ = e
-                last_exc = _wrapped
-                # Jika ini provider terakhir, akan raise di luar loop
-                print(f"[provider fallback] {provider.name} {provider.url} gagal {e.code}, coba fallback...", file=sys.stderr)
-                continue
-            except Exception as e:
-                last_exc = e
-                print(f"[provider fallback] {provider.name} {provider.url} error: {e}, coba fallback...", file=sys.stderr)
-                continue
+                    result = self._chat_with_provider(provider, messages, tools, extra_body, stream, on_delta, on_tool_delta, timeout)
+                    # simpan state sukses untuk model yang sama (akan dipakai lagi)
+                    try:
+                        update_provider_state(self.model, provider.sdk, provider.endpoint, provider.base_url)
+                        print(f"[provider] using {provider.sdk} {provider.url} for {self.model}", file=sys.stderr)
+                    except:
+                        pass
+                    return result
+                except urllib.error.HTTPError as e:
+                    body_txt = ""
+                    try:
+                        if e.fp:
+                            body_txt = e.read().decode("utf-8", errors="ignore")
+                    except:
+                        pass
+                    msg = f"HTTP {e.code}: {body_txt[:500]}"
+                    if e.code == 429:
+                        # 429 bukan kesalahan format, jangan fallback dulu, retry same provider
+                        if attempt < 5:
+                            wait = 5 + (attempt - 1) * 3  # 5, 8, 11, 14, 17
+                            print(f"[429] {provider.name} {provider.url} rate limit (attempt {attempt}/5), retry after {wait}s...", file=sys.stderr)
+                            try:
+                                time.sleep(wait)
+                            except KeyboardInterrupt:
+                                raise RuntimeError(f"Interrupted during 429 retry for {provider.name}") from e
+                            continue  # retry same provider
+                        else:
+                            # sudah 5 kali, fallback ke SDK lain
+                            _wrapped = RuntimeError(f"Provider {provider.name} {provider.url} failed after 5 retries {msg}")
+                            _wrapped.__cause__ = e
+                            last_exc = _wrapped
+                            print(f"[429] {provider.name} {provider.url} gagal setelah 5 retries {e.code}, fallback ke SDK lain...", file=sys.stderr)
+                            break  # break inner retry, lanjut ke provider berikutnya
+                    # Semua HTTP error lain langsung fallback ke provider lain
+                    _wrapped = RuntimeError(f"Provider {provider.name} {provider.url} failed {msg}")
+                    _wrapped.__cause__ = e
+                    last_exc = _wrapped
+                    print(f"[provider fallback] {provider.name} {provider.url} gagal {e.code}, coba fallback...", file=sys.stderr)
+                    break  # break inner retry, lanjut ke provider berikutnya
+                except Exception as e:
+                    last_exc = e
+                    print(f"[provider fallback] {provider.name} {provider.url} error: {e}, coba fallback...", file=sys.stderr)
+                    break  # non-HTTP error, fallback
 
         # semua gagal
         if last_exc:

@@ -137,33 +137,35 @@ Statistik: `ctx.token_usage()` -> `{tokens, max, percent, compactions}`. Lihat `
    - Jika tidak: simpan assistant, return `content`
 3. History JSONL tiap turn.
 
-Header LLM: `Authorization: Bearer public`, `User-Agent: opencode`, `x-opencode-session`, `x-opencode-request` (uuid), `x-opencode-project: global` - mirror `opencode.js:85`.
-Fallback header: `Authorization: Bearer <OPENAI_API_KEY>` untuk OpenAI, `x-api-key` + `anthropic-version: 2023-06-01` untuk Anthropic (`OPENAI_BASE_URL`/`ANTHROPIC_BASE_URL` via env).
+Header LLM: `Authorization: Bearer public`, `User-Agent: opencode`, `x-opencode-session`, `x-opencode-request` (uuid), `x-opencode-project: global` - mirror `opencode.js:85`. Semua fallback hanya ke `OPENCODE_BASE_URL/zen/v1` (sesuai instruksi).
 
 ## Provider Fallback Detail
 
-`agent_core/providers.py:320` `build_candidate_providers(model)` tentukan urutan berdasarkan model:
-- `muse-spark` → `opencode_responses` → `openai_responses` → `opencode_chat` → `anthropic`
-- `claude` → `anthropic` → `opencode_chat` → `openai_chat`
-- lain → `opencode_chat` → `openai_chat` → `opencode_responses` → `anthropic`
-Saved state di `.agent/llm_provider_state.json` dipakai pertama jika model sama; jika request 404/401/422/400 → fallback ke berikutnya dan `update_provider_state()` simpan yang sukses. History tetap OpenAI (`history.py:60` `save_message` tidak diubah), konversi hanya di `prepare_payload_for_provider()` untuk Anthropic (`system` pisah, `tool_calls`→`tool_use`, `tool`→`tool_result`, `tools` parameter→`input_schema`).
+`agent_core/providers.py:320` `build_candidate_providers(model)` hanya fallback ke `opencode.ai/zen/v1`:
+- `muse-spark` → `/zen/v1/responses` → `/zen/v1/chat/completions` → `/zen/v1/messages`
+- `claude` → `/zen/v1/messages` → `/zen/v1/chat/completions` → `/zen/v1/responses`
+- lain → `/zen/v1/chat/completions` → `/zen/v1/responses` → `/zen/v1/messages`
+Saved state di `.agent/llm_provider_state.json` dipakai pertama jika model sama; jika request 404/401/422/400 → fallback ke berikutnya dan `update_provider_state()` simpan yang sukses. History tetap OpenAI (`history.py:60` `save_message` tidak diubah), konversi hanya di `prepare_payload_for_provider()` untuk Responses (`instructions`+`input:[{type:input_text/output_text}]`+`store:false`) dan Anthropic (`system` pisah, `tool_calls`→`tool_use`, `tool`→`tool_result`, `tools` parameter→`input_schema`).
 
-SSE parsing: OpenAI (`data: {"choices":[{"delta":...}]}`) vs Anthropic (`event: content_block_delta` + `data: {"delta":{"text":...}}` / `input_json_delta`).
+SSE parsing: Chat `data: {"choices":[{"delta":{"content":...}}]}` + `[DONE]`, Responses `event: response.output_text.delta` `data:{"delta":"..."}`, Anthropic `event: content_block_delta` `data:{"delta":{"text":...}}`/`input_json_delta`.
 
-Env: `OPENCODE_BASE_URL`, `OPENAI_BASE_URL`, `ANTHROPIC_BASE_URL`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`.
+**429 handling** `agent_core/llm.py:90`: Jika `429 Too Many Requests` jangan fallback ke SDK lain dulu (bukan kesalahan format). Retry same provider max 5 kali dengan backoff `5 + (n-1)*3` detik (5, 8, 11, 14, 17), baru fallback ke SDK lain setelah 5 gagal. `time.sleep` interruptible via Ctrl-C.
+
+Env: `OPENCODE_BASE_URL` (default `https://opencode.ai`), `OPENAI_API_KEY`/`ANTHROPIC_API_KEY` jika diperlukan (tetap via opencode proxy).
 
 ## Pengujian
 
 ```bash
 python -m unittest tests.test_agent -v
-# 42 tests: LLM helpers, Context compact, Tools, Skills, History, Loop mock, Permissions, Commands, Providers (conversion openai↔anthropic, fallback chain, state, history format, streaming)
+# 45 tests: LLM helpers, Context, Tools, Skills, History, Loop, Permissions, Commands, Providers (conversion, fallback hanya opencode, state, history, streaming, 429 retry)
 
 # E2E real LLM (butuh network)
-python agent.py --once "Baca agent.py dan ringkas" --tool-call accept-fs --model mimo-v2.5-free  # fallback opencode_chat → openai_chat jika perlu
+python agent.py --once "Baca agent.py dan ringkas" --tool-call accept-fs --model mimo-v2.5-free  # fallback hanya opencode/zen/v1
 echo -e "baca demo.txt\ny\ny" | python agent.py --tool-call ask  # test permission prompt
 !echo hi  # di REPL jalankan shell terminatable
 python -c "from agent_core.llm import fetch_models; print(fetch_models()[:3])"
-cat .agent/llm_provider_state.json  # lihat state per-model
+cat .agent/llm_provider_state.json  # lihat state per-model: {model:{provider,endpoint,base_url}}
+# Test 429 retry: mock 429 2x lalu sukses -> retry 5s,8s tanpa fallback dulu
 ```
 
 ## Tanpa External Deps

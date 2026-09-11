@@ -772,6 +772,118 @@ class TestProviders(unittest.TestCase):
             try: os.unlink(tmp.name)
             except: pass
 
+    def test_429_retry_success(self):
+        from agent_core.llm import LLMClient
+        import urllib.request, urllib.error, json, io, time
+        call_count = {"n":0}
+        sleep_calls = []
+        orig_sleep = time.sleep
+        def fake_sleep(s):
+            sleep_calls.append(s)
+        time.sleep = fake_sleep
+        orig_urlopen = urllib.request.urlopen
+        def fake_urlopen(req, timeout=120):
+            call_count["n"] += 1
+            url = req.full_url if hasattr(req, 'full_url') else str(req)
+            if call_count["n"] <= 2:
+                raise urllib.error.HTTPError(url, 429, "Too Many Requests", {}, io.BytesIO(b'{"error":"rate limit"}'))
+            # success on 3rd
+            class FakeResp:
+                def __enter__(self): return self
+                def __exit__(self,*a): return False
+                def read(self, *a, **kw):
+                    return json.dumps({"choices":[{"message":{"content":"retry success","tool_calls":None},"finish_reason":"stop"}]}).encode()
+            return FakeResp()
+        import agent_core.providers as prov_mod
+        orig_state = prov_mod.PROVIDER_STATE_FILE
+        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".json")
+        tmp.close()
+        prov_mod.PROVIDER_STATE_FILE = tmp.name
+        urllib.request.urlopen = fake_urlopen
+        try:
+            client = LLMClient(model="mimo-v2.5-free")
+            # only one candidate to test retry without fallback
+            orig_build = prov_mod.build_candidate_providers
+            def only_one(m,b=None):
+                return [prov_mod.ProviderSpec("opencode_chat","https://opencode.ai","/zen/v1/chat/completions","openai_chat")]
+            prov_mod.build_candidate_providers = only_one
+            import agent_core.llm as llm_mod
+            orig_build_llm = llm_mod.build_candidate_providers
+            llm_mod.build_candidate_providers = only_one
+            res = client.chat([{"role":"user","content":"hi"}], stream=False)
+            self.assertEqual(res["content"], "retry success")
+            self.assertEqual(call_count["n"], 3)
+            # cek wait: 5 untuk attempt1, 8 untuk attempt2
+            self.assertEqual(sleep_calls, [5, 8])
+            # tidak fallback, tetap provider sama
+            saved = prov_mod.get_saved_provider("mimo-v2.5-free")
+            self.assertEqual(saved["provider"], "openai_chat")
+        finally:
+            time.sleep = orig_sleep
+            urllib.request.urlopen = orig_urlopen
+            prov_mod.build_candidate_providers = orig_build
+            llm_mod.build_candidate_providers = orig_build_llm
+            prov_mod.PROVIDER_STATE_FILE = orig_state
+            try: os.unlink(tmp.name)
+            except: pass
+
+    def test_429_fallback_after_5(self):
+        from agent_core.llm import LLMClient
+        import urllib.request, urllib.error, json, io, time
+        call_count = {"n":0}
+        sleep_calls = []
+        orig_sleep = time.sleep
+        time.sleep = lambda s: sleep_calls.append(s)
+        orig_urlopen = urllib.request.urlopen
+        def fake_urlopen(req, timeout=120):
+            call_count["n"] += 1
+            url = req.full_url if hasattr(req, 'full_url') else str(req)
+            # untuk provider pertama (opencode_chat), selalu 429 selama 5 kali
+            # untuk provider kedua (opencode_responses), sukses
+            if "chat/completions" in url:
+                raise urllib.error.HTTPError(url, 429, "Too Many Requests", {}, io.BytesIO(b'{"error":"rate"}'))
+            else:
+                class FakeResp:
+                    def __enter__(self): return self
+                    def __exit__(self,*a): return False
+                    def read(self, *a, **kw):
+                        return json.dumps({"choices":[{"message":{"content":"fallback after 429","tool_calls":None},"finish_reason":"stop"}]}).encode()
+                return FakeResp()
+        import agent_core.providers as prov_mod
+        orig_state = prov_mod.PROVIDER_STATE_FILE
+        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".json")
+        tmp.close()
+        prov_mod.PROVIDER_STATE_FILE = tmp.name
+        urllib.request.urlopen = fake_urlopen
+        try:
+            client = LLMClient(model="mimo-v2.5-free")
+            # candidates: chat then responses
+            orig_build = prov_mod.build_candidate_providers
+            def two_cands(m,b=None):
+                return [
+                    prov_mod.ProviderSpec("opencode_chat","https://opencode.ai","/zen/v1/chat/completions","openai_chat"),
+                    prov_mod.ProviderSpec("opencode_responses","https://opencode.ai","/zen/v1/responses","openai_responses")
+                ]
+            prov_mod.build_candidate_providers = two_cands
+            import agent_core.llm as llm_mod
+            orig_build_llm = llm_mod.build_candidate_providers
+            llm_mod.build_candidate_providers = two_cands
+            res = client.chat([{"role":"user","content":"hi"}], stream=False)
+            self.assertEqual(res["content"], "fallback after 429")
+            # harus retry 5 kali untuk chat (4 sleeps: 5,8,11,14) lalu fallback ke responses
+            self.assertEqual(sleep_calls, [5, 8, 11, 14])
+            self.assertEqual(call_count["n"], 6)  # 5 gagal chat + 1 sukses responses
+            saved = prov_mod.get_saved_provider("mimo-v2.5-free")
+            self.assertEqual(saved["provider"], "openai_responses")
+        finally:
+            time.sleep = orig_sleep
+            urllib.request.urlopen = orig_urlopen
+            prov_mod.build_candidate_providers = orig_build
+            llm_mod.build_candidate_providers = orig_build_llm
+            prov_mod.PROVIDER_STATE_FILE = orig_state
+            try: os.unlink(tmp.name)
+            except: pass
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
