@@ -244,9 +244,9 @@ class AgentLoop:
                         parsed = {}
                     # Format per spec
                     if fname in ("read", "write", "edit"):
-                        # fs: "<<< {type} {filepath}"
-                        fp = parsed.get("filePath") or parsed.get("filepath") or ""
-                        self._log(f"<<< preparing {fname}")
+                        # fs: "<<< preparing {type} {filepath}" - show target path
+                        fp = parsed.get("filePath") or parsed.get("filepath") or parsed.get("file_path") or parsed.get("path") or ""
+                        self._log(f"<<< preparing {fname} {fp}".strip())
                     elif fname == "bash":
                         # bash/command: "<<< exec {command}"
                         cmd = parsed.get("command", "")
@@ -281,8 +281,11 @@ class AgentLoop:
 
                     # Show preparing before execution
                     if fname in ("read", "write", "edit"):
-                        parsed = json.loads(fargs) if isinstance(fargs, str) else fargs
-                        fp = parsed.get("filePath") or parsed.get("filepath") or ""
+                        try:
+                            parsed = json.loads(fargs) if isinstance(fargs, str) else fargs
+                        except:
+                            parsed = {}
+                        fp = parsed.get("filePath") or parsed.get("filepath") or parsed.get("file_path") or parsed.get("path") or ""
                         self._log(f"<<< {fname} {fp}".strip())
 
                     # Deduplication: check if same tool with same args was called recently

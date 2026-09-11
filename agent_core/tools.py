@@ -152,7 +152,12 @@ def _truncate(s: str, max_chars: int = MAX_TOOL_OUTPUT_CHARS) -> str:
         return s
     return s[:max_chars] + f"\n\n...[TRUNCATED {len(s)-max_chars} chars]...\n\n"
 
-def tool_read(filePath: str, offset: int = 1, limit: int = 2000) -> str:
+def tool_read(filePath: str = None, offset: int = 1, limit: int = 2000, **kwargs) -> str:
+    # Handle parameter aliases to prevent loss (LLM may send filepath, path, file_path)
+    if not filePath:
+        filePath = kwargs.get("filepath") or kwargs.get("file_path") or kwargs.get("path") or kwargs.get("filename")
+    if not filePath:
+        return "Error: filePath is required (received empty). Expected {filePath: 'path/to/file'}"
     p = pathlib.Path(filePath)
     if not p.exists():
         return f"Error: file not found: {filePath}"
@@ -235,7 +240,16 @@ def tool_read(filePath: str, offset: int = 1, limit: int = 2000) -> str:
     except Exception as e:
         return f"Error read {filePath}: {e}"
 
-def tool_write(filePath: str, content: str) -> str:
+def tool_write(filePath: str = None, content: str = None, **kwargs) -> str:
+    # Alias handling
+    if not filePath:
+        filePath = kwargs.get("filepath") or kwargs.get("file_path") or kwargs.get("path")
+    if not content:
+        content = kwargs.get("Content") or kwargs.get("text")
+    if not filePath:
+        return "Error: filePath is required"
+    if content is None:
+        return "Error: content is required"
     p = pathlib.Path(filePath)
     try:
         if p.parent and not p.parent.exists():
@@ -246,7 +260,20 @@ def tool_write(filePath: str, content: str) -> str:
     except Exception as e:
         return f"Error write {filePath}: {e}"
 
-def tool_edit(filePath: str, oldString: str, newString: str, replaceAll: bool = False) -> str:
+def tool_edit(filePath: str = None, oldString: str = None, newString: str = None, replaceAll: bool = False, **kwargs) -> str:
+    # Alias handling
+    if not filePath:
+        filePath = kwargs.get("filepath") or kwargs.get("file_path") or kwargs.get("path")
+    if oldString is None:
+        oldString = kwargs.get("old_string") or kwargs.get("oldstring") or kwargs.get("oldString")
+    if newString is None:
+        newString = kwargs.get("new_string") or kwargs.get("newstring") or kwargs.get("newString")
+    if not filePath:
+        return "Error: filePath is required"
+    if oldString is None:
+        return "Error: oldString is required"
+    if newString is None:
+        return "Error: newString is required"
     p = pathlib.Path(filePath)
     if not p.exists():
         return f"Error: file not found: {filePath}"
@@ -268,7 +295,13 @@ def tool_edit(filePath: str, oldString: str, newString: str, replaceAll: bool = 
     except Exception as e:
         return f"Error edit {filePath}: {e}"
 
-def tool_glob(pattern: str, path: str = ".") -> str:
+def tool_glob(pattern: str = None, path: str = ".", **kwargs) -> str:
+    if not pattern:
+        pattern = kwargs.get("query") or kwargs.get("glob") or kwargs.get("Pattern")
+    if not pattern:
+        return "Error: pattern is required"
+    if not path or path == ".":
+        path = kwargs.get("base") or kwargs.get("dir") or kwargs.get("directory") or path
     base = pathlib.Path(path) if path else pathlib.Path(".")
     if not base.exists():
         return f"Error: base path does not exist: {path}"
@@ -307,7 +340,13 @@ def tool_glob(pattern: str, path: str = ".") -> str:
     except Exception as e:
         return f"Error glob {pattern}: {e}"
 
-def tool_grep(pattern: str, path: str = ".", include: str = "") -> str:
+def tool_grep(pattern: str = None, path: str = ".", include: str = "", **kwargs) -> str:
+    if not pattern:
+        pattern = kwargs.get("query") or kwargs.get("regex") or kwargs.get("Pattern")
+    if not pattern:
+        return "Error: pattern is required"
+    if not path or path == ".":
+        path = kwargs.get("dir") or kwargs.get("directory") or kwargs.get("base") or path
     base = pathlib.Path(path) if path else pathlib.Path(".")
     if not base.exists():
         return f"Error: path does not exist: {path}"
@@ -361,7 +400,13 @@ def tool_grep(pattern: str, path: str = ".", include: str = "") -> str:
         out += f"\n...[truncated {max_hits} hits]..."
     return out
 
-def tool_bash(command: str, workdir: str = ".", timeout: int = 120000) -> str:
+def tool_bash(command: str = None, workdir: str = ".", timeout: int = 120000, **kwargs) -> str:
+    if not command:
+        command = kwargs.get("cmd") or kwargs.get("command") or kwargs.get("script")
+    if not command:
+        return "Error: command is required"
+    if not workdir or workdir == ".":
+        workdir = kwargs.get("cwd") or kwargs.get("dir") or kwargs.get("path") or workdir
     wd = pathlib.Path(workdir) if workdir else pathlib.Path(".")
     if not wd.exists():
         return f"Error: workdir does not exist: {workdir}"
