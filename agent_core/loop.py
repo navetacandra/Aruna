@@ -167,6 +167,18 @@ class AgentLoop:
                     pass
                 return "[cancelled - escape]"
             except Exception as e:
+                # Khusus binary file - hanya Response yang didukung
+                if "Model tidak didukung" in str(e):
+                    err = "Model tidak didukung"
+                    print(f"\n{err}", file=sys.stderr)
+                    # juga print ke stdout agar user lihat
+                    try:
+                        print(err)
+                    except:
+                        pass
+                    self.context.add_assistant(err)
+                    save_message(self.session_id, {"role": "assistant", "content": err, "model": self.llm.model, "think_variant": _current_think()})
+                    return err
                 err = f"[LLM error iter {iteration}: {e}]"
                 print(f"\n{err}", file=sys.stderr)
                 self.context.add_assistant(err)

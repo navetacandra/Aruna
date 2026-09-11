@@ -139,6 +139,9 @@ class LLMClient:
                     print(f"[provider fallback] {provider.name} {provider.url} gagal {e.code}, coba fallback...", file=sys.stderr)
                     break  # break inner retry, lanjut ke provider berikutnya
                 except Exception as e:
+                    # Jika binary file dan bukan Response -> langsung tolak tanpa fallback
+                    if "Model tidak didukung" in str(e):
+                        raise RuntimeError("Model tidak didukung") from e
                     last_exc = e
                     print(f"[provider fallback] {provider.name} {provider.url} error: {e}, coba fallback...", file=sys.stderr)
                     break  # non-HTTP error, fallback

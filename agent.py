@@ -68,34 +68,34 @@ def _handle_binary_file(path: pathlib.Path) -> str:
     size = path.stat().st_size if path.exists() else 0
     mime, _ = mimetypes.guess_type(str(path))
     mime = mime or "application/octet-stream"
+    # deteksi mime via magic agar beboo.png (JPEG) benar
+    try:
+        with open(path, "rb") as fh:
+            head = fh.read(12)
+            if head.startswith(b"\xFF\xD8\xFF"):
+                mime = "image/jpeg"
+            elif head.startswith(b"\x89PNG"):
+                mime = "image/png"
+            elif head.startswith(b"GIF8"):
+                mime = "image/gif"
+            elif head.startswith(b"RIFF") and b"WEBP" in head:
+                mime = "image/webp"
+            elif head.startswith(b"%PDF"):
+                mime = "application/pdf"
+    except:
+        pass
     ext = path.suffix.lower()
     header = f"[Binary file: {path} | type: {mime} | size: {size} bytes]"
-    # Untuk gambar, beri info tambahan
-    if ext in (".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"):
-        return f"{header}\n[Image file - tidak dapat ditampilkan langsung sebagai teks. Gunakan tool 'read' untuk metadata atau deskripsikan. Jika model vision, file tersedia di path tersebut.]"
-    if ext == ".pdf":
-        # Coba ekstrak teks sederhana tanpa deps: cari teks di antara () atau < >
-        try:
-            data = path.read_bytes()
-            # Cari teks yang mungkin ada di PDF (sederhana, tidak sempurna)
-            # PDF text sering ada di dalam () atau <FEFF...>
-            text_parts = re.findall(rb"\(([^\)]{4,200})\)", data)
-            texts = []
-            for t in text_parts[:20]:  # ambil 20 pertama
-                try:
-                    s = t.decode("utf-8", errors="ignore").strip()
-                    if len(s) > 4 and not s.startswith("/") and not s.startswith("D:"):
-                        texts.append(s)
-                except:
-                    continue
-            if texts:
-                preview = "\n".join(texts[:10])
-                return f"{header}\n[PDF preview (ekstrak sederhana, mungkin tidak lengkap):]\n{preview[:2000]}"
-            else:
-                return f"{header}\n[PDF file - gunakan tool 'read' atau 'bash' untuk proses lebih lanjut. Tidak ada teks terdeteksi dengan parser sederhana.]"
-        except Exception as e:
-            return f"{header}\n[PDF file - error baca: {e}]"
-    # Untuk binary lain, coba base64 preview kecil
+    abs_path = str(path.resolve()) if path.exists() else str(path)
+    # Untuk gambar & PDF, buat marker untuk Response API (b.md)
+    # Jika model bukan Response, akan ditolak di providers.prepare_payload -> Model tidak didukung
+    if mime.startswith("image/") or ext in (".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"):
+        return f"{header}\n[[VISION_IMAGE:{abs_path}]]\n[Image - akan dikirim via OpenAI Response input_image, hanya model muse-spark yang didukung]"
+    if mime == "application/pdf" or ext == ".pdf":
+        return f"{header}\n[[INPUT_FILE:{abs_path}]]\n[PDF - akan dikirim via OpenAI Response input_file file_data, hanya model muse-spark yang didukung]"
+    # Untuk binary lain, coba base64 preview kecil tapi juga marker generic
+    if mime.startswith("image/") or ext in (".zip",".bin",".exe",".docx",".xlsx"):
+        return f"{header}\n[[INPUT_FILE:{abs_path}]]\n[Binary - hanya didukung via Response]"
     try:
         data = path.read_bytes()[:3000]
         b64 = base64.b64encode(data).decode("ascii")
@@ -103,6 +103,9 @@ def _handle_binary_file(path: pathlib.Path) -> str:
         return f"{header}\n[Binary preview base64 (3000 bytes pertama): {preview}]"
     except Exception as e:
         return f"{header}\n[Binary file - error: {e}]"
+
+def _has_binary_embed(text: str) -> bool:
+    return bool(text and ("[[VISION_IMAGE:" in text or "[[INPUT_FILE:" in text))
 
 def expand_at_mentions(user_input: str) -> str:
     """Deteksi @filepath di input, embed file content. Support @\"path dengan spasi\" dan @path."""
@@ -485,6 +488,11 @@ def main():
         print(f"> {args.once}", file=sys.stderr)
         if expanded_once != args.once:
             print(f"[expanded] {expanded_once[:500]}...", file=sys.stderr)
+        # Jika ada binary file diembed dan bukan Response model -> tolak
+        if _has_binary_embed(expanded_once) and not is_responses_model(llm.model):
+            print("Model tidak didukung - binary file hanya didukung via OpenAI Response API (gunakan model muse-spark-1.2/1.3)", file=sys.stderr)
+            print("Model tidak didukung", file=sys.stdout)
+            return
         try:
             answer = loop.run(expanded_once, stream=stream)
         except KeyboardInterrupt:
@@ -619,6 +627,11 @@ Commands:
         expanded = expand_at_mentions(user_input)
         if expanded != user_input:
             print(f"[embed] file di-embed ke prompt ({len(expanded)} chars)", file=sys.stderr)
+        # Jika ada binary file diembed dan bukan Response model -> tolak
+        if _has_binary_embed(expanded) and not is_responses_model(llm.model):
+            print("Model tidak didukung - binary file hanya didukung via OpenAI Response API (gunakan model muse-spark-1.2/1.3)", file=sys.stderr)
+            print("Model tidak didukung")
+            continue
         # Kirim ke agent loop
         try:
             loop.run(expanded, stream=stream)

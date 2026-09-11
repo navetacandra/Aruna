@@ -30,6 +30,8 @@ from .config import OPENCODE_BASE_URL, OPENCODE_UA, RESPONSES_MODELS, PROVIDER_S
 
 import re
 import uuid
+import base64 as _b64
+import mimetypes as _mimes
 
 def base_model_id(model: str) -> str:
     return re.sub(r"\([^()]+\)\s*$", "", str(model or "")).strip()
@@ -202,7 +204,29 @@ def openai_messages_to_responses(messages: List[Dict[str, Any]]) -> Tuple[Option
             continue
         if role == "user":
             text = content if isinstance(content, str) else str(content)
-            inputs.append({"role": "user", "content": [{"type": "input_text", "text": text}]})
+            # b.md: file input untuk Responses -> input_file / input_image
+            has_image = bool(VISION_IMAGE_RE.search(text)) if isinstance(text,str) else False
+            has_file = bool(INPUT_FILE_RE.search(text)) if isinstance(text,str) else False
+            if has_image or has_file:
+                # extract
+                clean_img, imgs = _extract_vision_images(text) if has_image else (text, [])
+                # setelah extract image, masih ada file marker?
+                clean, files = _extract_input_files(clean_img) if has_file else (clean_img, [])
+                parts: List[Dict[str, Any]] = []
+                if clean.strip():
+                    parts.append({"type": "input_text", "text": clean})
+                for mime, b64 in imgs:
+                    parts.append({"type": "input_image", "image_url": f"data:{mime};base64,{b64}", "detail": "auto"})
+                for fpath, mime, b64 in files:
+                    # b.md sec2: input_file dengan file_data (fallback upload 404)
+                    # pakai file_data data URL sesuai real test yang sukses
+                    fname = pathlib.Path(fpath).name if fpath else "file"
+                    parts.append({"type": "input_file", "filename": fname, "file_data": f"data:{mime};base64,{b64}"})
+                if not parts:
+                    parts.append({"type": "input_text", "text": text})
+                inputs.append({"role": "user", "content": parts})
+            else:
+                inputs.append({"role": "user", "content": [{"type": "input_text", "text": text}]})
             continue
         if role == "assistant":
             tool_calls = m.get("tool_calls")
@@ -232,9 +256,27 @@ def openai_messages_to_responses(messages: List[Dict[str, Any]]) -> Tuple[Option
                 # kita tidak embed tool_calls di input, karena Responses API handling tool via output
                 continue
         if role == "tool":
-            # tool result -> user input_text
+            # tool result -> user input_text, support file input b.md
             text = str(content)
-            inputs.append({"role": "user", "content": [{"type": "input_text", "text": f"Tool result ({m.get('name','')}): {text}"}]})
+            has_image = bool(VISION_IMAGE_RE.search(text))
+            has_file = bool(INPUT_FILE_RE.search(text))
+            if has_image or has_file:
+                clean_img, imgs = _extract_vision_images(text) if has_image else (text, [])
+                clean, files = _extract_input_files(clean_img) if has_file else (clean_img, [])
+                prefix = f"Tool result ({m.get('name','')}): {clean}" if clean.strip() else f"Tool result ({m.get('name','')}):"
+                parts: List[Dict[str, Any]] = []
+                if prefix.strip():
+                    parts.append({"type": "input_text", "text": prefix})
+                for mime, b64 in imgs:
+                    parts.append({"type": "input_image", "image_url": f"data:{mime};base64,{b64}", "detail": "auto"})
+                for fpath, mime, b64 in files:
+                    fname = pathlib.Path(fpath).name if fpath else "file"
+                    parts.append({"type": "input_file", "filename": fname, "file_data": f"data:{mime};base64,{b64}"})
+                if not parts:
+                    parts.append({"type": "input_text", "text": prefix})
+                inputs.append({"role": "user", "content": parts})
+            else:
+                inputs.append({"role": "user", "content": [{"type": "input_text", "text": f"Tool result ({m.get('name','')}): {text}"}]})
             continue
         # fallback
         inputs.append({"role": "user", "content": [{"type": "input_text", "text": str(content)}]})
@@ -266,6 +308,79 @@ def responses_output_to_openai(output: List[Dict[str, Any]]) -> Dict[str, Any]:
             })
     content = "".join(text_parts)
     return {"content": content, "tool_calls": tool_calls if tool_calls else None, "finish_reason": "tool_calls" if tool_calls else "stop"}
+
+# ---------- File input helpers (b.md - hanya Responses yang didukung untuk binary) ----------
+VISION_IMAGE_RE = re.compile(r"\[\[VISION_IMAGE:(.+?)\]\]")
+INPUT_FILE_RE = re.compile(r"\[\[INPUT_FILE:(.+?)\]\]")
+# Generic binary marker (fallback) - jika ada binary tanpa marker spesifik, tetap deteksi via header
+BINARY_HEADER_RE = re.compile(r"\[Binary file:")
+
+def _get_mime_and_b64(path_str: str) -> Optional[Tuple[str, str]]:
+    p = pathlib.Path(path_str.strip())
+    if not p.exists():
+        p2 = pathlib.Path.cwd() / path_str.strip()
+        if p2.exists():
+            p = p2
+        else:
+            return None
+    try:
+        data = p.read_bytes()
+        if len(data) > 8*1024*1024:
+            data = data[:8*1024*1024]
+        mime = None
+        if data.startswith(b"\xFF\xD8\xFF"):
+            mime = "image/jpeg"
+        elif data.startswith(b"\x89PNG"):
+            mime = "image/png"
+        elif data.startswith(b"GIF8"):
+            mime = "image/gif"
+        elif data.startswith(b"RIFF") and b"WEBP" in data[:12]:
+            mime = "image/webp"
+        elif data.startswith(b"%PDF"):
+            mime = "application/pdf"
+        else:
+            mime,_ = _mimes.guess_type(str(p))
+        mime = mime or "application/octet-stream"
+        b64 = _b64.b64encode(data).decode("ascii")
+        return mime, b64
+    except:
+        return None
+
+def _has_binary_marker(text: str) -> bool:
+    if not text or not isinstance(text, str):
+        return False
+    return bool(VISION_IMAGE_RE.search(text) or INPUT_FILE_RE.search(text) or BINARY_HEADER_RE.search(text))
+
+def _extract_vision_images(text: str) -> Tuple[str, List[Tuple[str,str]]]:
+    if not text or not isinstance(text, str):
+        return text or "", []
+    matches = VISION_IMAGE_RE.findall(text)
+    imgs: List[Tuple[str,str]] = []
+    for m in matches:
+        res = _get_mime_and_b64(m)
+        if res: imgs.append(res)
+    clean = VISION_IMAGE_RE.sub("", text)
+    clean = re.sub(r"\n{3,}", "\n\n", clean).strip()
+    if not clean and imgs:
+        clean = "Jelaskan gambar ini."
+    return clean, imgs
+
+def _extract_input_files(text: str) -> Tuple[str, List[Tuple[str,str,str]]]:
+    """Return (clean_text, [(path,mime,b64),...]) untuk INPUT_FILE"""
+    if not text or not isinstance(text, str):
+        return text or "", []
+    matches = INPUT_FILE_RE.findall(text)
+    files: List[Tuple[str,str,str]] = []
+    for m in matches:
+        res = _get_mime_and_b64(m)
+        if res:
+            mime,b64 = res
+            files.append((m.strip(), mime, b64))
+    clean = INPUT_FILE_RE.sub("", text)
+    clean = re.sub(r"\n{3,}", "\n\n", clean).strip()
+    if not clean and files:
+        clean = "Ringkas dokumen ini."
+    return clean, files
 
 # ---------- Provider definitions ----------
 
@@ -366,8 +481,26 @@ def get_headers_for_provider(provider: ProviderSpec, session_id: Optional[str] =
     return _opencode_headers(session_id)
 
 def prepare_payload_for_provider(provider: ProviderSpec, model: str, messages: List[Dict[str, Any]], tools: Optional[List[Dict[str, Any]]], extra_body: Optional[Dict[str, Any]], stream: bool) -> Dict[str, Any]:
-    """Konversi history OpenAI -> payload sesuai SDK-example."""
+    """Konversi history OpenAI -> payload sesuai SDK-example. Tolak binary jika bukan Responses."""
     sdk = provider.sdk
+    # Jika ada binary file diembed dan bukan openai response -> Model tidak didukung (sesuai instruksi)
+    # Deteksi marker vision/input_file atau header binary - cek model dulu (hanya muse-spark yang boleh)
+    has_binary = False
+    for m in messages:
+        c = m.get("content")
+        if isinstance(c, str) and _has_binary_marker(c):
+            has_binary = True
+            break
+        if isinstance(c, list):
+            s = json.dumps(c, ensure_ascii=False)
+            if _has_binary_marker(s):
+                has_binary = True
+                break
+    # Cek model: hanya Responses yang boleh handle binary (sesuai b.md)
+    if has_binary and not is_responses_model(model):
+        raise ValueError("Model tidak didukung")
+    if has_binary and sdk != "openai_responses":
+        raise ValueError("Model tidak didukung")
     if sdk == "openai_chat":
         # SDK-example sec 1: {model, messages:[{role,content}], stream}
         body: Dict[str, Any] = {"model": model, "messages": messages, "stream": stream}

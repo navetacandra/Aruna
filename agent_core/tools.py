@@ -175,8 +175,49 @@ def tool_read(filePath: str, offset: int = 1, limit: int = 2000) -> str:
         except Exception as e:
             return f"Error list dir {filePath}: {e}"
     try:
-        # batasi ukuran
         size = p.stat().st_size
+        # Deteksi binary/image/pdf via magic + ext untuk b.md (hanya Responses yang didukung)
+        is_image = False
+        is_pdf = False
+        mime = None
+        ext = p.suffix.lower()
+        if ext in (".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".ico"):
+            is_image = True
+        if ext == ".pdf":
+            is_pdf = True
+        try:
+            with open(p, "rb") as fh:
+                head = fh.read(12)
+                if head.startswith(b"\xFF\xD8\xFF"):
+                    is_image = True
+                    mime = "image/jpeg"
+                elif head.startswith(b"\x89PNG"):
+                    is_image = True
+                    mime = "image/png"
+                elif head.startswith(b"GIF8"):
+                    is_image = True
+                    mime = "image/gif"
+                elif head.startswith(b"RIFF") and b"WEBP" in head:
+                    is_image = True
+                    mime = "image/webp"
+                elif head.startswith(b"%PDF"):
+                    is_pdf = True
+                    mime = "application/pdf"
+        except:
+            pass
+        if is_image:
+            import mimetypes as _mt
+            if not mime:
+                mime,_ = _mt.guess_type(str(p))
+                mime = mime or "image/jpeg"
+            abs_path = str(p.resolve())
+            # Marker sesuai b.md - akan ditolak jika bukan Response (providers.py)
+            return f"Image read successfully\n[File: {filePath} | type: {mime} | {size} bytes]\n[[VISION_IMAGE:{abs_path}]]"
+        if is_pdf:
+            mime = mime or "application/pdf"
+            abs_path = str(p.resolve())
+            return f"PDF read successfully\n[File: {filePath} | type: {mime} | {size} bytes]\n[[INPUT_FILE:{abs_path}]]"
+        # batasi ukuran untuk text
         if size > MAX_READ_BYTES * 5:
             return f"Error: file terlalu besar ({size} bytes), gunakan offset/limit atau grep"
         with open(p, "r", encoding="utf-8", errors="ignore") as f:
