@@ -196,7 +196,7 @@ class MockLLM:
         self.calls = []
         self.extra_bodies = []
         self.model = model
-    def chat(self, messages, tools=None, stream=False, on_delta=None, on_tool_delta=None, extra_body=None, timeout=120):
+    def chat(self, messages, tools=None, stream=False, on_delta=None, on_tool_delta=None, on_reasoning_delta=None, extra_body=None, timeout=120):
         self.calls.append(messages)
         self.extra_bodies.append(extra_body)
         if not self.responses:

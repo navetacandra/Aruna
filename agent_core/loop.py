@@ -52,12 +52,6 @@ class AgentLoop:
         for iteration in range(1, self.max_iterations + 1):
             messages = self.context.get_messages()
             self._log(f"[iter {iteration}/{self.max_iterations}]")
-            # Tampilkan thinking sebelum LLM dipanggil
-            _think = _current_think()
-            if _think != "none":
-                self._log(f">>>>>> thinking [{_think}]")
-            else:
-                self._log(f">>>>>> thinking")
 
             # Streaming callbacks: print ke stdout langsung (tanpa TUI)
             def on_delta(tok: str):
@@ -65,13 +59,38 @@ class AgentLoop:
                     sys.stdout.write(tok)
                     sys.stdout.flush()
 
+            # Thinking callback - tampilkan saat LLM benar-benar reasoning
+            _think_started = False
+            def on_reasoning_delta(tok: str):
+                nonlocal _think_started
+                if not _think_started:
+                    _think = _current_think()
+                    if _think != "none":
+                        self._log(f">>>>>> thinking [{_think}]")
+                    else:
+                        self._log(f">>>>>> thinking")
+                    _think_started = True
+                # Jika reasoning text tersedia (Anthropic thinking), bisa tampilkan sebagai dimmed? Untuk sekarang hanya indikator
+                # Jika ingin tampilkan reasoning, uncomment di bawah:
+                # if stream and tok:
+                #     sys.stdout.write(tok)
+                #     sys.stdout.flush()
+
             # Panggil LLM dengan extra_body (mis. reasoning_effort untuk thinking) - escape (Ctrl-C/ESC) membatalkan
+            # Jika non-stream dan thinking aktif, tampilkan thinking sebelum call (karena tidak ada streaming reasoning)
+            if not stream and _current_think() != "none" and not _think_started:
+                if _current_think() != "none":
+                    self._log(f">>>>>> thinking [{_current_think()}]")
+                else:
+                    self._log(f">>>>>> thinking")
+                _think_started = True
             try:
                 result = self.llm.chat(
                     messages,
                     tools=self.tool_defs,
                     stream=stream,
                     on_delta=on_delta if stream else None,
+                    on_reasoning_delta=on_reasoning_delta if stream else None,
                     extra_body=self.extra_body if self.extra_body else None,
                     timeout=120
                 )

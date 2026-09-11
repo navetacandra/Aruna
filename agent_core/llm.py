@@ -79,6 +79,7 @@ class LLMClient:
              stream: bool = True,
              on_delta: Optional[Callable[[str], None]] = None,
              on_tool_delta: Optional[Callable[[str], None]] = None,
+             on_reasoning_delta: Optional[Callable[[str], None]] = None,
              timeout: int = 120) -> Dict[str, Any]:
         """Kirim chat dengan fallback multi-provider.
         History tetap OpenAI format, payload otomatis dikonversi per provider.
@@ -94,7 +95,7 @@ class LLMClient:
             # Escape (Ctrl-C / ESC) membatalkan response - jangan retry, langsung batal
             for attempt in range(1, 6):
                 try:
-                    result = self._chat_with_provider(provider, messages, tools, extra_body, stream, on_delta, on_tool_delta, timeout)
+                    result = self._chat_with_provider(provider, messages, tools, extra_body, stream, on_delta, on_tool_delta, on_reasoning_delta, timeout)
                     # simpan state sukses untuk model yang sama (akan dipakai lagi) - tanpa log mengganggu
                     try:
                         update_provider_state(self.model, provider.sdk, provider.endpoint, provider.base_url)
@@ -147,7 +148,7 @@ class LLMClient:
             raise RuntimeError(f"All providers failed for {self.model}: {last_exc}") from last_exc
         raise RuntimeError("All providers failed")
 
-    def _chat_with_provider(self, provider, messages, tools, extra_body, stream, on_delta, on_tool_delta, timeout):
+    def _chat_with_provider(self, provider, messages, tools, extra_body, stream, on_delta, on_tool_delta, on_reasoning_delta, timeout):
         body = prepare_payload_for_provider(provider, self.model, messages, tools, extra_body, stream)
         headers = get_headers_for_provider(provider, self.session_id)
         data = json.dumps(body).encode("utf-8")
@@ -166,11 +167,11 @@ class LLMClient:
 
         # Streaming
         if provider.sdk == "anthropic":
-            return self._stream_anthropic(req, timeout, on_delta, on_tool_delta)
+            return self._stream_anthropic(req, timeout, on_delta, on_tool_delta, on_reasoning_delta)
         else:
-            return self._stream_openai(provider, req, timeout, on_delta, on_tool_delta)
+            return self._stream_openai(provider, req, timeout, on_delta, on_tool_delta, on_reasoning_delta)
 
-    def _stream_openai(self, provider, req, timeout, on_delta, on_tool_delta):
+    def _stream_openai(self, provider, req, timeout, on_delta, on_tool_delta, on_reasoning_delta=None):
         content_parts: List[str] = []
         tool_accum: Dict[int, Dict[str, str]] = {}
         finish_reason: Optional[str] = None
@@ -205,13 +206,39 @@ class LLMClient:
                         handled = False
                         ptype = parsed.get("type", "")
                         if isinstance(ptype, str) and ptype.startswith("response."):
-                            if "output_text.delta" in ptype:
+                            # Reasoning - saat LLM melakukan reasoning
+                            if "reasoning" in ptype:
+                                d = parsed.get("delta", "") or parsed.get("text", "") or parsed.get("summary", "") or "reasoning"
+                                if on_reasoning_delta:
+                                    on_reasoning_delta(d if isinstance(d, str) else json.dumps(d))
+                                handled = True
+                            elif "output_text.delta" in ptype:
                                 d = parsed.get("delta", "") or parsed.get("text", "")
                                 if d:
                                     content_parts.append(d)
                                     if on_delta:
                                         on_delta(d)
                                 handled = True
+                            elif ptype == "response.output_item.added":
+                                item = parsed.get("item", {})
+                                if item.get("type") == "reasoning":
+                                    if on_reasoning_delta:
+                                        on_reasoning_delta(item.get("summary", "") or "reasoning")
+                                    handled = True
+                                elif item.get("type") == "function_call":
+                                    idx = parsed.get("output_index", 0)
+                                    if idx not in tool_accum:
+                                        tool_accum[idx] = {"id": item.get("call_id") or item.get("id") or "", "name": item.get("name") or "", "arguments": item.get("arguments") or ""}
+                                    else:
+                                        if item.get("call_id"):
+                                            tool_accum[idx]["id"] = item["call_id"]
+                                        if item.get("name"):
+                                            tool_accum[idx]["name"] = item["name"]
+                                        if item.get("arguments"):
+                                            tool_accum[idx]["arguments"] = item["arguments"]
+                                    handled = True
+                                else:
+                                    handled = True
                             elif ptype == "response.function_call_arguments.delta":
                                 idx = parsed.get("output_index", 0)
                                 delta = parsed.get("delta", "")
@@ -232,20 +259,6 @@ class LLMClient:
                                         tool_accum[idx]["name"] = parsed["name"]
                                 else:
                                     tool_accum[idx] = {"id": parsed.get("item_id") or "", "name": parsed.get("name") or "", "arguments": args}
-                                handled = True
-                            elif ptype == "response.output_item.added":
-                                item = parsed.get("item", {})
-                                if item.get("type") == "function_call":
-                                    idx = parsed.get("output_index", 0)
-                                    if idx not in tool_accum:
-                                        tool_accum[idx] = {"id": item.get("call_id") or item.get("id") or "", "name": item.get("name") or "", "arguments": item.get("arguments") or ""}
-                                    else:
-                                        if item.get("call_id"):
-                                            tool_accum[idx]["id"] = item["call_id"]
-                                        if item.get("name"):
-                                            tool_accum[idx]["name"] = item["name"]
-                                        if item.get("arguments"):
-                                            tool_accum[idx]["arguments"] = item["arguments"]
                                 handled = True
                             elif ptype in ("response.output_item.done", "response.content_part.added", "response.content_part.done", "response.created", "response.in_progress"):
                                 handled = True
@@ -341,7 +354,7 @@ class LLMClient:
 
         return {"content": "".join(content_parts), "tool_calls": tool_calls, "finish_reason": finish_reason or ("tool_calls" if tool_calls else "stop")}
 
-    def _stream_anthropic(self, req, timeout, on_delta, on_tool_delta):
+    def _stream_anthropic(self, req, timeout, on_delta, on_tool_delta, on_reasoning_delta=None):
         """Streaming khusus Anthropic SSE (event: + data:) dinormalisasi ke OpenAI."""
         content_parts: List[str] = []
         # anthropic tool_use: index -> {id, name, input_json}
@@ -382,7 +395,7 @@ class LLMClient:
 
                         ptype = parsed.get("type", "")
 
-                        # Anthropic events
+                        # Anthropic events - thinking = reasoning
                         if ptype == "content_block_start":
                             idx = parsed.get("index", 0)
                             block = parsed.get("content_block", {})
@@ -391,12 +404,19 @@ class LLMClient:
                             if btype == "tool_use":
                                 # init tool
                                 tool_accum[idx] = {"id": block.get("id",""), "name": block.get("name",""), "input_json": ""}
+                            elif btype == "thinking":
+                                if on_reasoning_delta:
+                                    on_reasoning_delta(block.get("thinking", "") or "thinking")
                         elif ptype == "content_block_delta":
                             idx = parsed.get("index", 0)
                             delta = parsed.get("delta", {})
                             dtype = delta.get("type", "")
                             btype = block_types.get(idx, "")
-                            if dtype == "text_delta" or (btype == "text" and "text" in delta):
+                            if dtype == "thinking_delta" or btype == "thinking":
+                                txt = delta.get("thinking", "") or delta.get("text", "")
+                                if on_reasoning_delta:
+                                    on_reasoning_delta(txt or "thinking")
+                            elif dtype == "text_delta" or (btype == "text" and "text" in delta):
                                 txt = delta.get("text", "")
                                 if txt:
                                     content_parts.append(txt)
