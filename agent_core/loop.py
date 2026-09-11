@@ -52,6 +52,12 @@ class AgentLoop:
         for iteration in range(1, self.max_iterations + 1):
             messages = self.context.get_messages()
             self._log(f"[iter {iteration}/{self.max_iterations}]")
+            # Tampilkan thinking sebelum LLM dipanggil
+            _think = _current_think()
+            if _think != "none":
+                self._log(f">>>>>> thinking [{_think}]")
+            else:
+                self._log(f">>>>>> thinking")
 
             # Streaming callbacks: print ke stdout langsung (tanpa TUI)
             def on_delta(tok: str):
@@ -157,6 +163,8 @@ class AgentLoop:
                     tid = tc.get("id", f"call_{iteration}")
                     fname = tc["function"]["name"]
                     fargs = tc["function"]["arguments"]
+                    # Tampilkan preparing sebelum eksekusi
+                    self._log(f">>>>> preparing {fname}")
                     # Permission gate untuk hardware tools
                     if self.permission_manager is not None:
                         try:
