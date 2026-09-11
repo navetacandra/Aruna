@@ -105,15 +105,16 @@ class AgentLoop:
                 self._log(f"[warning] iter {iteration} still running, LLM may be stuck. Pushing to provide final answer soon.")
                 self.context.messages.append({"role": "user", "content": f"[SYSTEM REMINDER] You are at iteration {iteration}/{self.max_iterations}. If you have enough information, please provide the final answer soon. Do not keep calling the same tool repeatedly (especially fetch-skills/glob/grep). If stuck, make the best conclusion from available information."})
                 messages = self.context.get_messages()
-            # Detect excessive tool frequency in history
+            # Detect excessive tool frequency in history - only if same tool with same args repeated
             if len(self._tool_history) >= 8:
                 from collections import Counter
                 recent = self._tool_history[-8:]
-                cnt = Counter([h.split(":")[0] for h in recent])
-                for tname, c in cnt.items():
+                cnt = Counter(recent)
+                for full_key, c in cnt.items():
                     if c >= 4:
-                        self._log(f"[warning] tool {tname} called {c}x in last 8 calls, likely stuck.")
-                        self.context.messages.append({"role": "user", "content": f"[SYSTEM REMINDER] Tool '{tname}' has been called {c} times in the last 8 calls with similar arguments. Result is already in history. DO NOT call '{tname}' again with the same arguments. Use the existing results or provide the final answer."})
+                        tname = full_key.split(":", 1)[0]
+                        self._log(f"[warning] tool {tname} with same args called {c}x in last 8 calls, likely stuck.")
+                        self.context.messages.append({"role": "user", "content": f"[SYSTEM REMINDER] Tool '{tname}' with the same arguments has been called {c} times in the last 8 calls. Result is already in history. DO NOT call '{tname}' again with the same arguments. Use the existing results or provide the final answer."})
                         break
 
             # Streaming callbacks: print directly to stdout (without TUI)
