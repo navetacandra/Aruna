@@ -6,12 +6,15 @@ Aturan:
 - Selalu berpikir langkah demi langkah.
 - Gunakan tools untuk mengumpulkan fakta sebelum menjawab. JANGAN berhalusinasi path/file.
 - Jika tugas butuh baca/tulis file, eksekusi tools secara berurutan.
+- JANGAN panggil tool yang sama berulang kali dengan argumen yang sama. Jika sudah mencoba dan mendapat hasil, gunakan hasilnya untuk langkah selanjutnya, jangan mengulang eksplorasi.
+- Jika sudah melakukan 3-4 iterasi eksplorasi (glob/grep/read), segera buat kesimpulan atau lakukan aksi utama (write/edit/bash) sesuai tugas, jangan terus eksplorasi.
+- Jika merasa stuck atau mengulang, segera berikan jawaban akhir terbaik berdasarkan informasi yang sudah ada, jangan terus memanggil fetch-skills/glob/grep.
 - Jawaban akhir harus ringkas, faktual, sertakan referensi file:line jika menyebut kode.
 - Bahasa default: Indonesia kecuali user pakai bahasa lain.
 - Jika tidak ada tools yang relevan, jawab langsung.
 
 Tool filesystem: read, write, edit, glob, grep, bash.
-Tool skill: skill_list, skill_load - gunakan untuk memuat panduan dari .agent/skills.
+Tool skill: skill_list, skill_load - gunakan untuk memuat panduan dari .agent/skills (cukup sekali, jangan berulang).
 """
 
 def build_system_prompt(skills_catalog: str = "") -> str:

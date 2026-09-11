@@ -33,6 +33,8 @@ class AgentLoop:
         self.tool_defs = get_tool_definitions()
         self.permission_manager = permission_manager
         self.extra_body = extra_body or {}
+        self._tool_cache: Dict[str, str] = {}
+        self._tool_history: List[str] = []  # list of "fname:args_json" for dedup
 
     def _log(self, s: str):
         if self.verbose:
@@ -53,6 +55,22 @@ class AgentLoop:
             messages = self.context.get_messages()
             self._log(f"[iter {iteration}/{self.max_iterations}]")
 
+            # Deteksi stuck loop: jika iterasi sudah banyak dan masih mengulang tool yang sama, ingatkan LLM
+            if iteration in (15, 20, 25):
+                self._log(f"[warning] iter {iteration} masih berjalan, LLM mungkin stuck. Mendorong untuk segera memberikan jawaban akhir.")
+                self.context.messages.append({"role": "user", "content": f"[SYSTEM REMINDER] Kamu sudah di iterasi {iteration}/{self.max_iterations}. Jika sudah cukup informasi, segera berikan jawaban akhir. Jangan terus memanggil tool yang sama berulang kali (terutama fetch-skills/glob/grep). Jika stuck, buat kesimpulan terbaik dari informasi yang ada."})
+                messages = self.context.get_messages()
+            # Deteksi frekuensi tool yang berlebihan dalam history
+            if len(self._tool_history) >= 8:
+                from collections import Counter
+                recent = self._tool_history[-8:]
+                cnt = Counter([h.split(":")[0] for h in recent])
+                for tname, c in cnt.items():
+                    if c >= 4:
+                        self._log(f"[warning] tool {tname} dipanggil {c}x dalam 8 panggilan terakhir, kemungkinan stuck.")
+                        self.context.messages.append({"role": "user", "content": f"[SYSTEM REMINDER] Tool '{tname}' sudah kamu panggil {c} kali dalam 8 panggilan terakhir dengan argumen serupa. Hasilnya sudah ada di history. JANGAN panggil '{tname}' lagi dengan argumen yang sama. Gunakan hasil yang sudah ada atau berikan jawaban akhir."})
+                        break
+
             # Streaming callbacks: print ke stdout langsung (tanpa TUI)
             def on_delta(tok: str):
                 if stream:
@@ -66,9 +84,9 @@ class AgentLoop:
                 if not _think_started:
                     _think = _current_think()
                     if _think != "none":
-                        self._log(f">>>>>> thinking [{_think}]")
+                        self._log(f"<<< thinking [{_think}]")
                     else:
-                        self._log(f">>>>>> thinking")
+                        self._log(f"<<< thinking")
                     _think_started = True
                 # Jika reasoning text tersedia (Anthropic thinking), bisa tampilkan sebagai dimmed? Untuk sekarang hanya indikator
                 # Jika ingin tampilkan reasoning, uncomment di bawah:
@@ -80,9 +98,9 @@ class AgentLoop:
             # Jika non-stream dan thinking aktif, tampilkan thinking sebelum call (karena tidak ada streaming reasoning)
             if not stream and _current_think() != "none" and not _think_started:
                 if _current_think() != "none":
-                    self._log(f">>>>>> thinking [{_current_think()}]")
+                    self._log(f"<<< thinking [{_current_think()}]")
                 else:
-                    self._log(f">>>>>> thinking")
+                    self._log(f"<<< thinking")
                 _think_started = True
             try:
                 result = self.llm.chat(
@@ -148,34 +166,34 @@ class AgentLoop:
                         parsed = {}
                     # Format per spec
                     if fname in ("read", "write", "edit"):
-                        # fs: ">>>> {type} {filepath}"
+                        # fs: "<<< {type} {filepath}"
                         fp = parsed.get("filePath") or parsed.get("filepath") or ""
-                        self._log(f">>>> {fname} {fp}".strip())
+                        self._log(f"<<< {fname} {fp}".strip())
                     elif fname == "bash":
-                        # bash/command: ">>>> exec {command}"
+                        # bash/command: "<<< exec {command}"
                         cmd = parsed.get("command", "")
-                        self._log(f">>>> exec {cmd}".strip())
+                        self._log(f"<<< exec {cmd}".strip())
                     elif fname == "skill_list":
-                        self._log(">>>> fetch-skills")
+                        self._log("<<< fetch-skills")
                     elif fname == "skill_load":
                         name = parsed.get("name", "")
-                        self._log(f">>>> load-skill [{name}]" if name else ">>>> load-skill")
+                        self._log(f"<<< load-skill [{name}]" if name else "<<< load-skill")
                     elif fname == "grep":
                         pat = parsed.get("pattern", "")
                         p = parsed.get("path", "") or parsed.get("include", "")
-                        # grep: ">>>> grep {pattern} {path}"
-                        self._log(f">>>> grep {pat} {p}".strip())
+                        # grep: "<<< grep {pattern} {path}"
+                        self._log(f"<<< grep {pat} {p}".strip())
                     elif fname == "glob":
                         pat = parsed.get("pattern", "")
                         p = parsed.get("path", "")
-                        self._log(f">>>> glob {pat} {p}".strip() if p else f">>>> glob {pat}".strip())
+                        self._log(f"<<< glob {pat} {p}".strip() if p else f"<<< glob {pat}".strip())
                     else:
                         # fallback generic
                         if isinstance(fargs, str):
                             args_str = fargs
                         else:
                             args_str = json.dumps(fargs, ensure_ascii=False)
-                        self._log(f">>>> {fname} {args_str}")
+                        self._log(f"<<< {fname} {args_str}")
 
                 # Eksekusi tiap tool sequential dengan permission check - Batalkan truncate, simpan full
                 for tc in tool_calls:
@@ -184,6 +202,26 @@ class AgentLoop:
                     fargs = tc["function"]["arguments"]
                     # Tampilkan preparing sebelum eksekusi
                     self._log(f">>>>> preparing {fname}")
+                    # Deduplikasi: cek apakah tool yang sama dengan args sama sudah dipanggil baru-baru ini
+                    try:
+                        parsed_args = json.loads(fargs) if isinstance(fargs, str) else fargs
+                        cache_key = f"{fname}:{json.dumps(parsed_args, sort_keys=True, ensure_ascii=False)}"
+                    except:
+                        cache_key = f"{fname}:{fargs}"
+                    # Track history untuk deteksi frekuensi
+                    self._tool_history.append(cache_key)
+                    if len(self._tool_history) > 20:
+                        self._tool_history = self._tool_history[-20:]
+                    # Jika sudah pernah dipanggil dalam 5 panggilan terakhir dengan hasil yang sama, skip dan beri warning
+                    if cache_key in self._tool_cache:
+                        # Cek apakah ini panggilan berulang dalam window pendek (5 terakhir)
+                        recent_calls = self._tool_history[-6:-1]  # 5 sebelum current
+                        if cache_key in recent_calls:
+                            self._log(f"[skip] {fname} dengan args sama sudah dipanggil baru-baru ini, gunakan cache")
+                            output = self._tool_cache[cache_key] + "\n\n[NOTE: Tool ini sudah dipanggil sebelumnya dengan argumen yang sama. Hasil di-cache untuk menghindari loop. Jangan panggil lagi dengan argumen sama.]"
+                            self.context.add_tool_result(tid, fname, output)
+                            save_message(self.session_id, {"role": "tool", "tool_call_id": tid, "name": fname, "content": output})
+                            continue
                     # Permission gate untuk hardware tools
                     if self.permission_manager is not None:
                         try:
@@ -199,6 +237,8 @@ class AgentLoop:
                             save_message(self.session_id, {"role": "tool", "tool_call_id": tid, "name": fname, "content": output})
                             continue
                     output = execute_tool(fname, fargs)
+                    # Simpan ke cache untuk deduplikasi
+                    self._tool_cache[cache_key] = output
                     # Batalkan truncate - simpan full output ke context & history
                     self.context.add_tool_result(tid, fname, output)
                     save_message(self.session_id, {"role": "tool", "tool_call_id": tid, "name": fname, "content": output})

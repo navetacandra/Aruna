@@ -15,7 +15,7 @@ RESPONSES_MODELS = {
 # Context manager limits
 MAX_CONTEXT_TOKENS = int(os.environ.get("AGENT_MAX_TOKENS", "120000"))
 COMPACTION_THRESHOLD = 0.85  # compact saat >85% limit
-KEEP_RECENT_MESSAGES = 8
+KEEP_RECENT_MESSAGES = 16
 MAX_TOOL_OUTPUT_CHARS = 20000  # truncate tool output > ini
 SUMMARY_TRIGGER_TOKENS = 80000
 
