@@ -176,7 +176,7 @@ class LLMClient:
                         except json.JSONDecodeError:
                             continue
 
-                        # Responses API delta
+                        # Responses API delta - sesuai SDK-example.md sec 2
                         handled = False
                         ptype = parsed.get("type", "")
                         if isinstance(ptype, str) and ptype.startswith("response."):
@@ -187,8 +187,45 @@ class LLMClient:
                                     if on_delta:
                                         on_delta(d)
                                 handled = True
-                            elif "function_call" in ptype or "tool" in ptype.lower():
-                                pass
+                            elif ptype == "response.function_call_arguments.delta":
+                                idx = parsed.get("output_index", 0)
+                                delta = parsed.get("delta", "")
+                                if idx not in tool_accum:
+                                    tool_accum[idx] = {"id": parsed.get("item_id") or "", "name": "", "arguments": delta}
+                                else:
+                                    tool_accum[idx]["arguments"] += delta
+                                if on_tool_delta:
+                                    on_tool_delta(delta)
+                                handled = True
+                            elif ptype == "response.function_call_arguments.done":
+                                idx = parsed.get("output_index", 0)
+                                args = parsed.get("arguments", "")
+                                if idx in tool_accum:
+                                    if args and args != tool_accum[idx]["arguments"]:
+                                        tool_accum[idx]["arguments"] = args
+                                    if parsed.get("name"):
+                                        tool_accum[idx]["name"] = parsed["name"]
+                                else:
+                                    tool_accum[idx] = {"id": parsed.get("item_id") or "", "name": parsed.get("name") or "", "arguments": args}
+                                handled = True
+                            elif ptype == "response.output_item.added":
+                                item = parsed.get("item", {})
+                                if item.get("type") == "function_call":
+                                    idx = parsed.get("output_index", 0)
+                                    if idx not in tool_accum:
+                                        tool_accum[idx] = {"id": item.get("call_id") or item.get("id") or "", "name": item.get("name") or "", "arguments": item.get("arguments") or ""}
+                                    else:
+                                        if item.get("call_id"):
+                                            tool_accum[idx]["id"] = item["call_id"]
+                                        if item.get("name"):
+                                            tool_accum[idx]["name"] = item["name"]
+                                        if item.get("arguments"):
+                                            tool_accum[idx]["arguments"] = item["arguments"]
+                                handled = True
+                            elif ptype in ("response.output_item.done", "response.content_part.added", "response.content_part.done", "response.created", "response.in_progress"):
+                                handled = True
+                            elif "function_call" in ptype:
+                                handled = True
                             if ptype in ("response.completed", "response.done"):
                                 finish_reason = "stop"
                                 handled = True

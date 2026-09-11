@@ -1,18 +1,24 @@
-"""Provider abstraction untuk multi-SDK fallback.
+"""Provider abstraction untuk multi-SDK fallback - HANYA via opencode.ai/zen/v1.
 
-Mendukung 3 format:
-- openai_chat: POST {base}/v1/chat/completions atau {base}/zen/v1/chat/completions (OpenAI SDK chat)
-- openai_responses: POST {base}/v1/responses atau {base}/zen/v1/responses (OpenAI responses)
-- anthropic_messages: POST {base}/v1/messages (Anthropic SDK)
+Mendukung 3 format sesuai SDK-example.md:
+- openai_chat: POST {base}/zen/v1/chat/completions (OpenAI SDK chat)
+  Request: {model, messages:[{role,content}], stream}
+  Response: {choices:[{message:{role,content}, finish_reason}]}
+  SSE: data: {"choices":[{"delta":{"content":"..."}}]} + data: [DONE]
+
+- openai_responses: POST {base}/zen/v1/responses (OpenAI Responses, plural)
+  Request: {model, instructions: system, input:[{role,content:[{type:input_text/output_text,text}]}], store:false, stream}
+  Response: {output:[{type:message, role:assistant, content:[{type:output_text,text}]}], usage}
+  SSE: event: response.output_text.delta + data: {"delta":"..."} ; event: response.completed
+
+- anthropic_messages: POST {base}/zen/v1/messages (Anthropic SDK via opencode proxy)
+  Request: {model, max_tokens, system, messages:[{role,content}], stream, tools:[{name,description,input_schema}]}
+  Response: {content:[{type:text,text}], stop_reason}
+  SSE: event: message_start / content_block_start / content_block_delta / message_delta / message_stop
 
 History disimpan tetap format OpenAI (messages[] dengan role user/assistant/tool + tool_calls).
-Saat request ke anthropic, payload dikonversi:
-  - system dipisah
-  - tool_calls -> content blocks tool_use
-  - tool results -> user content blocks tool_result
-  - tools OpenAI -> Anthropic input_schema
-
-Streaming SSE juga dinormalisasi ke format OpenAI {content, tool_calls}.
+Saat request, payload dikonversi sesuai SDK. State per-model disimpan di .agent/llm_provider_state.json.
+Fallback HANYA ke base opencode.ai/zen/v1, rubah state jika fallback terjadi.
 """
 import json
 import os
@@ -20,9 +26,8 @@ import pathlib
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
-from .config import OPENCODE_BASE_URL, OPENCODE_UA, RESPONSES_MODELS, OPENAI_BASE_URL, ANTHROPIC_BASE_URL, PROVIDER_STATE_FILE as CFG_PROVIDER_STATE_FILE
+from .config import OPENCODE_BASE_URL, OPENCODE_UA, RESPONSES_MODELS, PROVIDER_STATE_FILE as CFG_PROVIDER_STATE_FILE
 
-# --- Helpers port dari llm.py ---
 import re
 import uuid
 
@@ -37,19 +42,16 @@ def is_anthropic_model(model: str) -> bool:
     m = model.lower()
     return any(k in m for k in ("claude", "anthropic", "sonnet", "opus", "haiku")) and "muse-spark" not in m
 
-# ---------- Conversion OpenAI <-> Anthropic ----------
+# ---------- Conversion helpers ----------
 
 def openai_tools_to_anthropic(tools: Optional[List[Dict[str, Any]]]) -> Optional[List[Dict[str, Any]]]:
     if not tools:
         return None
     out = []
     for t in tools:
-        # OpenAI: {type:"function", function:{name, description, parameters}}
         fn = t.get("function", {}) if t.get("type") == "function" else t
-        # handle both wrapped and unwrapped
         name = fn.get("name")
         if not name:
-            # mungkin sudah anthropic? skip
             if "name" in t and "input_schema" in t:
                 out.append(t)
                 continue
@@ -80,12 +82,9 @@ def anthropic_tools_to_openai(tools: Optional[List[Dict[str, Any]]]) -> Optional
     return out
 
 def openai_messages_to_anthropic(messages: List[Dict[str, Any]]) -> Tuple[Optional[str], List[Dict[str, Any]]]:
-    """Konversi OpenAI messages -> (system, anthropic_messages).
-    History tetap OpenAI, konversi hanya saat request anthropic.
-    """
+    """OpenAI messages -> (system, anthropic_messages)."""
     system_parts: List[str] = []
     anthropic_msgs: List[Dict[str, Any]] = []
-
     for m in messages:
         role = m.get("role")
         content = m.get("content")
@@ -101,24 +100,18 @@ def openai_messages_to_anthropic(messages: List[Dict[str, Any]]) -> Tuple[Option
             else:
                 system_parts.append(str(content))
             continue
-
         if role == "user":
-            # content bisa string atau list
             if isinstance(content, str):
                 anthropic_msgs.append({"role": "user", "content": content})
             elif isinstance(content, list):
-                # sudah anthropic style? pass
                 anthropic_msgs.append({"role": "user", "content": content})
             elif content is None:
                 anthropic_msgs.append({"role": "user", "content": ""})
             else:
                 anthropic_msgs.append({"role": "user", "content": str(content)})
             continue
-
         if role == "assistant":
-            # assistant bisa punya content + tool_calls
             tool_calls = m.get("tool_calls")
-            # jika tanpa tool_calls, simple
             if not tool_calls:
                 c = content or ""
                 if isinstance(c, str):
@@ -126,7 +119,6 @@ def openai_messages_to_anthropic(messages: List[Dict[str, Any]]) -> Tuple[Option
                 else:
                     anthropic_msgs.append({"role": "assistant", "content": str(c)})
             else:
-                # ada tool_calls -> konversi ke content blocks
                 blocks: List[Dict[str, Any]] = []
                 if content and isinstance(content, str) and content.strip():
                     blocks.append({"type": "text", "text": content})
@@ -134,69 +126,34 @@ def openai_messages_to_anthropic(messages: List[Dict[str, Any]]) -> Tuple[Option
                     fn = tc.get("function", {})
                     name = fn.get("name", "")
                     args_raw = fn.get("arguments", "{}")
-                    # parse args
                     try:
                         args = json.loads(args_raw) if isinstance(args_raw, str) else args_raw
                     except:
                         args = {}
-                        # coba simpan raw
                         if isinstance(args_raw, str):
                             args = {"_raw": args_raw}
-                    # anthropic id harus ada
                     tid = tc.get("id") or f"toolu_{uuid.uuid4().hex[:8]}"
-                    blocks.append({
-                        "type": "tool_use",
-                        "id": tid,
-                        "name": name,
-                        "input": args if isinstance(args, dict) else {}
-                    })
+                    blocks.append({"type": "tool_use", "id": tid, "name": name, "input": args if isinstance(args, dict) else {}})
                 anthropic_msgs.append({"role": "assistant", "content": blocks})
             continue
-
         if role == "tool":
-            # OpenAI: {role:"tool", tool_call_id, name, content}
-            # Anthropic: user role dengan tool_result
             tool_use_id = m.get("tool_call_id") or m.get("id") or "unknown"
             tool_content = m.get("content") or ""
-            # anthropic expects content as string or blocks, kita pakai string
-            # need to wrap as tool_result block in user message
-            # Jika ada beberapa tool results berturut-turut, anthropic mengizinkan multiple blocks dalam satu user message
-            # Tapi di OpenAI mereka terpisah per tool; kita gabung jika sebelumnya juga tool result user?
-            # Simpler: tiap tool result jadi satu user message dengan satu block
-            block = {
-                "type": "tool_result",
-                "tool_use_id": tool_use_id,
-                "content": str(tool_content)
-            }
-            # cek apakah pesan terakhir juga user tool_result -> gabungkan
+            block = {"type": "tool_result", "tool_use_id": tool_use_id, "content": str(tool_content)}
             if anthropic_msgs and anthropic_msgs[-1].get("role") == "user":
                 last = anthropic_msgs[-1]
-                # last content mungkin string atau list
                 if isinstance(last.get("content"), list) and any(b.get("type")=="tool_result" for b in last["content"]):
                     last["content"].append(block)
-                elif isinstance(last.get("content"), str) and last["content"] == "":
-                    # shouldn't happen
-                    anthropic_msgs.append({"role": "user", "content": [block]})
                 else:
-                    # jika last adalah user biasa tanpa tool_result, buat baru
                     anthropic_msgs.append({"role": "user", "content": [block]})
             else:
                 anthropic_msgs.append({"role": "user", "content": [block]})
             continue
-
-        # fallback: treat as user
         anthropic_msgs.append({"role": "user", "content": str(content or "")})
-
     system = "\n\n".join(system_parts) if system_parts else None
-    # Anthropic requires alternating user/assistant, gabungkan jika ada consecutive same role? Kita biarkan, tapi perbaiki:
-    # Jika ada user->user consecutive karena tool_result grouping, sudah diatasi.
-    # Jika ada assistant->assistant, gabungkan? jarang.
-    # Normalisasi: jika ada dua user berturut-turut tanpa tool_result, gabungkan dengan \n?
-    # Biarkan untuk sekarang, provider akan handle.
     return system, anthropic_msgs
 
 def anthropic_response_to_openai(content_blocks: List[Dict[str, Any]], stop_reason: Optional[str] = None) -> Dict[str, Any]:
-    """Konversi anthropic content blocks non-stream ke OpenAI {content, tool_calls}."""
     text_parts: List[str] = []
     tool_calls: List[Dict[str, Any]] = []
     for block in content_blocks or []:
@@ -207,19 +164,108 @@ def anthropic_response_to_openai(content_blocks: List[Dict[str, Any]], stop_reas
             tool_calls.append({
                 "id": block.get("id"),
                 "type": "function",
-                "function": {
-                    "name": block.get("name"),
-                    "arguments": json.dumps(block.get("input", {}), ensure_ascii=False)
-                }
+                "function": {"name": block.get("name"), "arguments": json.dumps(block.get("input", {}), ensure_ascii=False)}
             })
     content = "".join(text_parts)
-    # map stop_reason
     finish = "stop"
     if stop_reason == "tool_use":
         finish = "tool_calls"
     elif stop_reason in ("end_turn", "stop"):
         finish = "stop"
     return {"content": content, "tool_calls": tool_calls if tool_calls else None, "finish_reason": finish}
+
+def openai_messages_to_responses(messages: List[Dict[str, Any]]) -> Tuple[Optional[str], List[Dict[str, Any]]]:
+    """OpenAI messages -> (instructions, input) untuk Responses API sesuai SDK-example.md sec 2 & 5.
+    - system -> instructions (digabung)
+    - user -> {role:user, content:[{type:input_text, text}]}
+    - assistant -> {role:assistant, content:[{type:output_text, text}]}
+    - tool -> {role:user, content:[{type:input_text, text: tool result}] }  (fallback, karena spec tidak cover tools di responses, tapi kita normalisasi)
+    History eksplisit: seluruh conversation dikirim kembali di input, terbaru paling akhir.
+    """
+    instructions_parts: List[str] = []
+    inputs: List[Dict[str, Any]] = []
+    for m in messages:
+        role = m.get("role")
+        content = m.get("content") or ""
+        # content bisa string, kita bungkus
+        if role == "system":
+            if isinstance(content, str):
+                instructions_parts.append(content)
+            elif isinstance(content, list):
+                for p in content:
+                    if isinstance(p, dict) and "text" in p:
+                        instructions_parts.append(p["text"])
+                    else:
+                        instructions_parts.append(str(p))
+            else:
+                instructions_parts.append(str(content))
+            continue
+        if role == "user":
+            text = content if isinstance(content, str) else str(content)
+            inputs.append({"role": "user", "content": [{"type": "input_text", "text": text}]})
+            continue
+        if role == "assistant":
+            tool_calls = m.get("tool_calls")
+            # Jika tanpa tool, simple output_text
+            if not tool_calls:
+                text = content if isinstance(content, str) else str(content)
+                # jika kosong, tetap kirim array kosong? tapi spec butuh text
+                if text.strip():
+                    inputs.append({"role": "assistant", "content": [{"type": "output_text", "text": text}]})
+                else:
+                    # assistant kosong tanpa tool, tetap skip? tapi kita masukkan kosong untuk jaga turn
+                    inputs.append({"role": "assistant", "content": [{"type": "output_text", "text": ""}]})
+            else:
+                # ada tool_calls: kita representasikan sebagai assistant dengan output_text + function_call
+                # Di Responses API, function_call adalah type terpisah, tapi kita sederhanakan jadi output_text + tool info di content
+                # Untuk kompatibilitas, kita gabung text + tool_calls sebagai input_text json
+                # Namun untuk request, kita tetap kirim text biasa dan biarkan tools di payload terpisah
+                text = content if isinstance(content, str) else ""
+                blocks = []
+                if text.strip():
+                    blocks.append({"type": "output_text", "text": text})
+                # tool_calls di responses tidak dikirim via input, tapi via tools di payload, jadi kita tidak perlu embed di input
+                # Tapi kita tetap perlu merepresentasikan bahwa assistant pernah memanggil tool, jadi kita tambahkan placeholder
+                # Sederhananya: kirim assistant dengan text, tool result nanti sebagai user input_text
+                inputs.append({"role": "assistant", "content": blocks if blocks else [{"type": "output_text", "text": ""}]})
+                # tool results akan dikirim sebagai user input_text terpisah di iterasi berikutnya (role tool)
+                # kita tidak embed tool_calls di input, karena Responses API handling tool via output
+                continue
+        if role == "tool":
+            # tool result -> user input_text
+            text = str(content)
+            inputs.append({"role": "user", "content": [{"type": "input_text", "text": f"Tool result ({m.get('name','')}): {text}"}]})
+            continue
+        # fallback
+        inputs.append({"role": "user", "content": [{"type": "input_text", "text": str(content)}]})
+    instructions = "\n\n".join(instructions_parts) if instructions_parts else None
+    return instructions, inputs
+
+def responses_output_to_openai(output: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Konversi Responses API output -> OpenAI {content, tool_calls}."""
+    # output: [{type:message, role:assistant, content:[{type:output_text,text}]}]
+    text_parts: List[str] = []
+    tool_calls: List[Dict[str, Any]] = []
+    for item in output or []:
+        if item.get("type") == "message" and item.get("role") == "assistant":
+            for c in item.get("content", []):
+                if c.get("type") == "output_text":
+                    text_parts.append(c.get("text",""))
+                elif c.get("type") == "function_call":
+                    # function_call di responses
+                    tool_calls.append({
+                        "id": c.get("call_id") or c.get("id") or f"call_{uuid.uuid4().hex[:8]}",
+                        "type": "function",
+                        "function": {"name": c.get("name"), "arguments": c.get("arguments") or "{}"}
+                    })
+        elif item.get("type") == "function_call":
+            tool_calls.append({
+                "id": item.get("call_id") or item.get("id") or f"call_{uuid.uuid4().hex[:8]}",
+                "type": "function",
+                "function": {"name": item.get("name"), "arguments": item.get("arguments") or "{}"}
+            })
+    content = "".join(text_parts)
+    return {"content": content, "tool_calls": tool_calls if tool_calls else None, "finish_reason": "tool_calls" if tool_calls else "stop"}
 
 # ---------- Provider definitions ----------
 
@@ -244,13 +290,7 @@ def save_provider_state(state: Dict[str, Any]):
 
 def update_provider_state(model: str, provider: str, endpoint: str, base_url: str):
     state = load_provider_state()
-    state[model] = {
-        "provider": provider,
-        "endpoint": endpoint,
-        "base_url": base_url,
-        "updated_at": time.time()
-    }
-    # juga simpan untuk base model id
+    state[model] = {"provider": provider, "endpoint": endpoint, "base_url": base_url, "updated_at": time.time()}
     bmid = base_model_id(model)
     if bmid != model:
         state[bmid] = state[model]
@@ -262,9 +302,6 @@ def get_saved_provider(model: str) -> Optional[Dict[str, Any]]:
         return state[model]
     bmid = base_model_id(model)
     return state.get(bmid)
-
-# Provider configs: list fallback order secara umum
-# Jika tidak ada state tersimpan, pilih primary berdasarkan model, lalu fallback semua.
 
 def _opencode_headers(session_id: Optional[str] = None) -> Dict[str, str]:
     return {
@@ -278,34 +315,12 @@ def _opencode_headers(session_id: Optional[str] = None) -> Dict[str, str]:
         "Accept": "text/event-stream",
     }
 
-def _openai_headers(api_key: Optional[str] = None) -> Dict[str, str]:
-    key = api_key or os.environ.get("OPENAI_API_KEY") or "public"
-    return {
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {key}",
-        "Accept": "text/event-stream",
-    }
-
-def _anthropic_headers(api_key: Optional[str] = None) -> Dict[str, str]:
-    key = api_key or os.environ.get("ANTHROPIC_API_KEY") or ""
-    h = {
-        "Content-Type": "application/json",
-        "x-api-key": key,
-        "anthropic-version": "2023-06-01",
-        "Accept": "text/event-stream",
-    }
-    # jika tidak ada key, tetap kirim Bearer public fallback? tapi anthropic butuh x-api-key
-    if not key:
-        # fallback ke opencode style? biarkan kosong, nanti akan fail dan fallback
-        pass
-    return h
-
 class ProviderSpec:
     def __init__(self, name: str, base_url: str, endpoint: str, sdk: str):
-        self.name = name  # mis. opencode_chat, openai_chat, anthropic
+        self.name = name
         self.base_url = base_url.rstrip("/")
-        self.endpoint = endpoint  # mis. /zen/v1/chat/completions, /v1/chat/completions, /v1/messages
-        self.sdk = sdk  # openai_chat, openai_responses, anthropic
+        self.endpoint = endpoint
+        self.sdk = sdk
     @property
     def url(self) -> str:
         return self.base_url + self.endpoint
@@ -313,43 +328,30 @@ class ProviderSpec:
         return f"ProviderSpec({self.name} {self.url} sdk={self.sdk})"
 
 def build_candidate_providers(model: str, base_url: Optional[str] = None) -> List[ProviderSpec]:
-    """Bangun urutan fallback berdasarkan model & saved state."""
+    """HANYA fallback ke opencode.ai/zen/v1 (sesuai instruksi)."""
     saved = get_saved_provider(model)
     candidates: List[ProviderSpec] = []
-
-    # Jika ada saved dan model sama, jadikan prioritas utama
     if saved:
         try:
             candidates.append(ProviderSpec("saved", saved["base_url"], saved["endpoint"], saved["provider"]))
         except:
             pass
-
-    # Tentukan primary berdasarkan model type
-    opencode_base = base_url or OPENCODE_BASE_URL
-    openai_base = OPENAI_BASE_URL
-    anthropic_base = ANTHROPIC_BASE_URL
-
-    # Susun fallback umum
+    opencode_base = (base_url or OPENCODE_BASE_URL).rstrip("/")
+    # endpoint sesuai SDK-example (semua di bawah /zen/v1)
+    # OpenAI Chat: /zen/v1/chat/completions, Responses: /zen/v1/responses (plural), Anthropic: /zen/v1/messages
     if is_responses_model(model):
-        # Responses primary
         candidates.append(ProviderSpec("opencode_responses", opencode_base, "/zen/v1/responses", "openai_responses"))
-        candidates.append(ProviderSpec("openai_responses", openai_base, "/v1/responses", "openai_responses"))
         candidates.append(ProviderSpec("opencode_chat", opencode_base, "/zen/v1/chat/completions", "openai_chat"))
-        candidates.append(ProviderSpec("openai_chat", openai_base, "/v1/chat/completions", "openai_chat"))
-        # anthropic jarang untuk responses, tapi tambahkan
-        candidates.append(ProviderSpec("anthropic", anthropic_base, "/v1/messages", "anthropic"))
+        candidates.append(ProviderSpec("opencode_anthropic", opencode_base, "/zen/v1/messages", "anthropic"))
     elif is_anthropic_model(model):
-        candidates.append(ProviderSpec("anthropic", anthropic_base, "/v1/messages", "anthropic"))
+        candidates.append(ProviderSpec("opencode_anthropic", opencode_base, "/zen/v1/messages", "anthropic"))
         candidates.append(ProviderSpec("opencode_chat", opencode_base, "/zen/v1/chat/completions", "openai_chat"))
-        candidates.append(ProviderSpec("openai_chat", openai_base, "/v1/chat/completions", "openai_chat"))
-    else:
-        # default openai_chat via opencode
-        candidates.append(ProviderSpec("opencode_chat", opencode_base, "/zen/v1/chat/completions", "openai_chat"))
-        candidates.append(ProviderSpec("openai_chat", openai_base, "/v1/chat/completions", "openai_chat"))
         candidates.append(ProviderSpec("opencode_responses", opencode_base, "/zen/v1/responses", "openai_responses"))
-        candidates.append(ProviderSpec("anthropic", anthropic_base, "/v1/messages", "anthropic"))
-
-    # deduplikasi berdasarkan url+sdk
+    else:
+        candidates.append(ProviderSpec("opencode_chat", opencode_base, "/zen/v1/chat/completions", "openai_chat"))
+        candidates.append(ProviderSpec("opencode_responses", opencode_base, "/zen/v1/responses", "openai_responses"))
+        candidates.append(ProviderSpec("opencode_anthropic", opencode_base, "/zen/v1/messages", "anthropic"))
+    # deduplikasi
     seen = set()
     uniq: List[ProviderSpec] = []
     for c in candidates:
@@ -360,67 +362,73 @@ def build_candidate_providers(model: str, base_url: Optional[str] = None) -> Lis
     return uniq
 
 def get_headers_for_provider(provider: ProviderSpec, session_id: Optional[str] = None) -> Dict[str, str]:
-    # header dipilih berdasarkan base_url (lebih reliabel daripada name, terutama untuk saved state)
-    if "opencode.ai" in provider.base_url:
-        return _opencode_headers(session_id)
-    if provider.sdk == "anthropic" or "anthropic.com" in provider.base_url:
-        return _anthropic_headers()
-    # openai
-    return _openai_headers()
+    # Semua fallback hanya ke opencode, jadi header selalu opencode
+    return _opencode_headers(session_id)
 
 def prepare_payload_for_provider(provider: ProviderSpec, model: str, messages: List[Dict[str, Any]], tools: Optional[List[Dict[str, Any]]], extra_body: Optional[Dict[str, Any]], stream: bool) -> Dict[str, Any]:
-    """Konversi payload OpenAI messages/tools ke format provider, history tetap OpenAI."""
+    """Konversi history OpenAI -> payload sesuai SDK-example."""
     sdk = provider.sdk
-    if sdk in ("openai_chat", "openai_responses"):
-        body: Dict[str, Any] = {
-            "model": model,
-            "messages": messages,
-            "stream": stream,
-        }
+    if sdk == "openai_chat":
+        # SDK-example sec 1: {model, messages:[{role,content}], stream}
+        body: Dict[str, Any] = {"model": model, "messages": messages, "stream": stream}
         if tools:
             body["tools"] = tools
             body["tool_choice"] = "auto"
         if extra_body:
             body.update(extra_body)
-        # Responses transformation (dari opencode.js)
-        if sdk == "openai_responses":
-            if "max_output_tokens" not in body:
-                if "max_completion_tokens" in body:
-                    body["max_output_tokens"] = body["max_completion_tokens"]
-                elif "max_tokens" in body:
-                    body["max_output_tokens"] = body["max_tokens"]
-            body.pop("max_tokens", None)
-            body.pop("max_completion_tokens", None)
-            if "reasoning_effort" in body:
-                body["reasoning"] = {
-                    "effort": str(body.pop("reasoning_effort")).lower().strip(),
-                    "summary": "auto"
-                }
+        return body
+    elif sdk == "openai_responses":
+        # SDK-example sec 2 & 5: {model, instructions, input:[{role,content:[{type,text}]}], store:false, stream, tools}
+        instructions, inputs = openai_messages_to_responses(messages)
+        body: Dict[str, Any] = {"model": model, "input": inputs, "stream": stream, "store": False}
+        if instructions:
+            body["instructions"] = instructions
+        if tools:
+            # Responses tools: flat {type:function, name, description, parameters} - tidak nested function
+            flat_tools = []
+            for t in tools:
+                if t.get("type") == "function" and "function" in t:
+                    fn = t["function"]
+                    flat_tools.append({
+                        "type": "function",
+                        "name": fn.get("name"),
+                        "description": fn.get("description", ""),
+                        "parameters": fn.get("parameters") or {"type": "object", "properties": {}}
+                    })
+                elif "name" in t:
+                    # sudah flat
+                    flat_tools.append(t)
+                else:
+                    flat_tools.append(t)
+            body["tools"] = flat_tools
+            body["tool_choice"] = "auto"
+        if extra_body:
+            # responses tidak pakai max_tokens tapi max_output_tokens
+            # mapping sudah ada di llm.py? tapi kita handle di sini
+            for k, v in extra_body.items():
+                if k == "reasoning_effort":
+                    body["reasoning"] = {"effort": str(v).lower().strip(), "summary": "auto"}
+                elif k in ("max_tokens", "max_completion_tokens"):
+                    body["max_output_tokens"] = v
+                elif k == "max_output_tokens":
+                    body[k] = v
+                else:
+                    body[k] = v
         return body
     elif sdk == "anthropic":
+        # SDK-example sec 3: {model, max_tokens, system, messages, stream, tools}
         system, anth_msgs = openai_messages_to_anthropic(messages)
         anth_tools = openai_tools_to_anthropic(tools)
-        body: Dict[str, Any] = {
-            "model": model,
-            "messages": anth_msgs,
-            "stream": stream,
-            "max_tokens": (extra_body or {}).get("max_tokens") or (extra_body or {}).get("max_output_tokens") or 4096,
-        }
+        body: Dict[str, Any] = {"model": model, "messages": anth_msgs, "stream": stream, "max_tokens": (extra_body or {}).get("max_tokens") or (extra_body or {}).get("max_output_tokens") or 4096}
         if system:
             body["system"] = system
         if anth_tools:
             body["tools"] = anth_tools
-        # mapping thinking: anthropic thinking beda, tapi kita pass reasoning_effort?
-        # untuk sekarang ignore extra_body thinking untuk anthropic, tapi bisa map ke thinking field
         if extra_body:
-            # anthropic tidak pakai reasoning_effort, tapi cek jika ada thinking
-            if "reasoning_effort" in extra_body:
-                # anthropic beta thinking: {"type":"thinking","budget_tokens":...} - skip
-                pass
-            # pass through other keys like temperature
             for k, v in extra_body.items():
-                if k not in ("reasoning_effort", "reasoning", "max_tokens", "max_output_tokens"):
+                if k not in ("reasoning_effort", "reasoning", "max_tokens", "max_output_tokens", "max_completion_tokens"):
                     body[k] = v
+                # reasoning_effort untuk anthropic tidak ada, ignore
         return body
     else:
         raise ValueError(f"Unknown sdk {sdk}")
@@ -431,45 +439,25 @@ def parse_nonstream_response(provider: ProviderSpec, resp_json: Dict[str, Any]) 
         msg = resp_json.get("choices", [{}])[0].get("message", {})
         return {"content": msg.get("content") or "", "tool_calls": msg.get("tool_calls"), "finish_reason": resp_json.get("choices", [{}])[0].get("finish_reason", "stop")}
     elif sdk == "openai_responses":
-        # coba extract responses text
-        # responses format: {output: [{content:[{text}] }]} atau output_text
-        try:
-            if "output" in resp_json:
-                out = resp_json["output"]
-                if isinstance(out, list):
-                    for item in out:
-                        if isinstance(item, dict) and "content" in item:
-                            for c in item["content"]:
-                                if c.get("text"):
-                                    return {"content": c["text"], "tool_calls": None, "finish_reason": "stop"}
-            if "output_text" in resp_json:
-                return {"content": resp_json["output_text"], "tool_calls": None, "finish_reason": "stop"}
-        except: pass
-        # fallback ke choices
+        # SDK-example: {output:[{type:message, content:[{type:output_text,text}]}]}
+        if "output" in resp_json:
+            try:
+                conv = responses_output_to_openai(resp_json.get("output", []))
+                # jika ada usage, ignore
+                if conv["content"] or conv["tool_calls"]:
+                    return conv
+            except: pass
+            # fallback jika output kosong, coba parse lain
+        if "output_text" in resp_json:
+            return {"content": resp_json["output_text"], "tool_calls": None, "finish_reason": "stop"}
+        # fallback ke choices (jika opencode masih kirim choices untuk responses)
         msg = resp_json.get("choices", [{}])[0].get("message", {})
         if msg:
             return {"content": msg.get("content") or "", "tool_calls": msg.get("tool_calls"), "finish_reason": resp_json.get("choices", [{}])[0].get("finish_reason", "stop")}
-        # jika masih tidak, coba delta?
         return {"content": "", "tool_calls": None, "finish_reason": "stop"}
     elif sdk == "anthropic":
-        # Anthropic non-stream: {content: [{type,text}...], stop_reason}
         content_blocks = resp_json.get("content", [])
         stop_reason = resp_json.get("stop_reason")
         return anthropic_response_to_openai(content_blocks, stop_reason)
     else:
         raise ValueError(f"Unknown sdk {sdk}")
-
-# Streaming helpers
-def is_streaming_error_parsable_as_fallback(exc: Exception, body_text: str = "") -> bool:
-    """Tentukan apakah error layak fallback ke SDK lain."""
-    txt = body_text.lower()
-    # 404, 405, 422, 400 sering karena endpoint salah
-    if isinstance(exc, Exception) and hasattr(exc, 'code'):
-        code = getattr(exc, 'code', 0)
-        if code in (404, 405, 422, 415):
-            return True
-        if code == 400 and any(k in txt for k in ("endpoint", "not found", "unsupported", "invalid", "unknown", "responses", "messages", "chat.completions")):
-            return True
-    if any(k in txt for k in ("unknown endpoint", "not found", "unsupported model", "invalid request: responses", "anthropic", "messages")):
-        return True
-    return False

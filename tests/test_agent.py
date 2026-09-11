@@ -488,35 +488,63 @@ class TestProviders(unittest.TestCase):
 
     def test_prepare_payload_anthropic(self):
         from agent_core.providers import prepare_payload_for_provider, ProviderSpec
-        p = ProviderSpec("anthropic", "https://api.anthropic.com", "/v1/messages", "anthropic")
+        # fallback hanya ke opencode, jadi base harus opencode.ai/zen/v1
+        p = ProviderSpec("opencode_anthropic", "https://opencode.ai", "/zen/v1/messages", "anthropic")
         msgs = [{"role":"system","content":"sys"},{"role":"user","content":"hi"}]
         body = prepare_payload_for_provider(p, "claude-3", msgs, None, None, False)
         self.assertIn("system", body)
         self.assertEqual(body["system"], "sys")
         self.assertEqual(body["messages"][0]["role"], "user")
+        self.assertIn("max_tokens", body)
 
     def test_prepare_payload_openai(self):
         from agent_core.providers import prepare_payload_for_provider, ProviderSpec
-        p = ProviderSpec("openai_chat", "https://api.openai.com", "/v1/chat/completions", "openai_chat")
+        p = ProviderSpec("opencode_chat", "https://opencode.ai", "/zen/v1/chat/completions", "openai_chat")
         msgs = [{"role":"user","content":"hi"}]
         tools = [{"type":"function","function":{"name":"read","description":"read","parameters":{"type":"object","properties":{}}}}]
         body = prepare_payload_for_provider(p, "gpt-4", msgs, tools, {"temperature":0.5}, True)
         self.assertEqual(body["model"], "gpt-4")
         self.assertIn("tools", body)
         self.assertEqual(body["temperature"], 0.5)
+        self.assertIn("messages", body)
+
+    def test_prepare_payload_responses(self):
+        from agent_core.providers import prepare_payload_for_provider, ProviderSpec
+        # Sesuai SDK-example sec 2: input + instructions + store:false
+        p = ProviderSpec("opencode_responses", "https://opencode.ai", "/zen/v1/responses", "openai_responses")
+        msgs = [
+            {"role":"system","content":"You are helpful"},
+            {"role":"user","content":"Halo"},
+            {"role":"assistant","content":"Halo! Ada yang bisa saya bantu?"},
+            {"role":"user","content":"Jelaskan REST API."}
+        ]
+        body = prepare_payload_for_provider(p, "gpt-5.6-luna", msgs, None, None, False)
+        self.assertEqual(body["model"], "gpt-5.6-luna")
+        self.assertIn("input", body)
+        self.assertIn("instructions", body)
+        self.assertEqual(body["instructions"], "You are helpful")
+        self.assertEqual(body["store"], False)
+        self.assertEqual(body["input"][0]["role"], "user")
+        self.assertEqual(body["input"][0]["content"][0]["type"], "input_text")
+        self.assertEqual(body["input"][1]["content"][0]["type"], "output_text")
 
     def test_candidate_providers(self):
         from agent_core.providers import build_candidate_providers
-        # muse-spark should prioritize responses
+        # muse-spark should prioritize responses (opencode)
         cands = build_candidate_providers("muse-spark-1.2-contributor-free")
         self.assertEqual(cands[0].sdk, "openai_responses")
-        # claude should prioritize anthropic
+        self.assertIn("opencode.ai/zen/v1", cands[0].url)
+        # claude should prioritize anthropic via opencode
         cands2 = build_candidate_providers("claude-sonnet-4")
         self.assertEqual(cands2[0].sdk, "anthropic")
+        self.assertIn("opencode.ai/zen/v1/messages", cands2[0].url)
         # gpt should prioritize openai_chat via opencode
         cands3 = build_candidate_providers("mimo-v2.5-free")
         self.assertEqual(cands3[0].sdk, "openai_chat")
         self.assertIn("/zen/v1/chat/completions", cands3[0].endpoint)
+        # semua candidates harus hanya opencode.ai/zen/v1
+        for cand in cands + cands2 + cands3:
+            self.assertIn("opencode.ai/zen/v1", cand.url)
 
     def test_provider_state_persistence(self):
         from agent_core.providers import update_provider_state, get_saved_provider, load_provider_state
@@ -546,7 +574,7 @@ class TestProviders(unittest.TestCase):
         from agent_core.llm import LLMClient
         from agent_core.providers import ProviderSpec
         import urllib.error, json, io
-        # Mock urlopen to fail first provider (opencode_chat) then succeed second (openai_chat)
+        # Mock urlopen to fail first provider (opencode_chat) then succeed second (opencode_responses) - hanya fallback ke opencode.ai/zen/v1
         orig_urlopen = urllib.request.urlopen
         call_count = {"n":0}
         def fake_urlopen(req, timeout=120):
@@ -554,22 +582,21 @@ class TestProviders(unittest.TestCase):
             url = req.full_url if hasattr(req, 'full_url') else str(req)
             # first call fail with 404
             if call_count["n"] == 1:
+                # Pastikan fallback hanya ke opencode
+                self.assertIn("opencode.ai/zen/v1", url)
                 raise urllib.error.HTTPError(url, 404, "Not Found", {}, io.BytesIO(b'{"error":"not found"}'))
-            # second succeed with openai chat format
+            # second succeed - bisa chat atau responses, keduanya di opencode
+            self.assertIn("opencode.ai/zen/v1", url)
             fake_resp = io.BytesIO(json.dumps({"choices":[{"message":{"content":"fallback success","tool_calls":None},"finish_reason":"stop"}]}).encode())
             # mock context manager
             class FakeResp:
                 def __enter__(self): return self
                 def __exit__(self, *a): return False
                 def read(self, *a, **kw): return fake_resp.read(*a, **kw) if hasattr(fake_resp, 'read') else b''
-            # simpler: return BytesIO with json, but urlopen expects .read()
-            # We'll return a mock that has read and __enter__
             mock = FakeResp()
             mock.read = lambda *a, **kw: json.dumps({"choices":[{"message":{"content":"fallback success","tool_calls":None},"finish_reason":"stop"}]}).encode()
             mock.__enter__ = lambda s: s
             mock.__exit__ = lambda s,*a: False
-            # need to make it work with with statement in llm.py: with urllib.request.urlopen(...) as resp: resp.read()
-            # So return mock
             return mock
         import agent_core.providers as prov_mod
         orig_state = prov_mod.PROVIDER_STATE_FILE
@@ -582,10 +609,12 @@ class TestProviders(unittest.TestCase):
             res = client.chat([{"role":"user","content":"hi"}], stream=False)
             self.assertEqual(res["content"], "fallback success")
             self.assertGreaterEqual(call_count["n"], 2)
-            # state should be saved to second provider (openai_chat)
+            # state should be saved to second provider (openai_responses via opencode)
             saved = prov_mod.get_saved_provider("mimo-v2.5-free")
             self.assertIsNotNone(saved)
-            self.assertEqual(saved["provider"], "openai_chat")
+            self.assertEqual(saved["provider"], "openai_responses")
+            self.assertIn("opencode.ai", saved["base_url"])
+            self.assertIn("/zen/v1", saved["endpoint"])
         finally:
             urllib.request.urlopen = orig_urlopen
             prov_mod.PROVIDER_STATE_FILE = orig_state
