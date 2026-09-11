@@ -20,7 +20,7 @@ MAX_TOOL_OUTPUT_CHARS = 20000  # truncate tool output > ini
 SUMMARY_TRIGGER_TOKENS = 80000
 
 # Agent loop
-MAX_ITERATIONS = int(os.environ.get("AGENT_MAX_ITERATIONS", "25"))
+MAX_ITERATIONS = int(os.environ.get("AGENT_MAX_ITERATIONS", "30"))
 STREAM = True
 
 # Paths

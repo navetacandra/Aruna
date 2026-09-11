@@ -50,8 +50,7 @@ class AgentLoop:
 
         for iteration in range(1, self.max_iterations + 1):
             messages = self.context.get_messages()
-            usage = self.context.token_usage()
-            self._log(f"\n[iter {iteration}/{self.max_iterations} | tokens {usage['tokens']}/{usage['max']} ({usage['percent']}%)]")
+            self._log(f"[iter {iteration}/{self.max_iterations}]")
 
             # Streaming callbacks: print ke stdout langsung (tanpa TUI)
             def on_delta(tok: str):
@@ -111,17 +110,36 @@ class AgentLoop:
                 self.context.add_assistant(content, tool_calls)
                 save_message(self.session_id, {"role": "assistant", "content": content, "tool_calls": tool_calls, "model": self.llm.model, "think_variant": _current_think()})
 
-                # Tampilkan tool calls ke stderr agar user tahu
+                # Tampilkan hanya apa yang dikerjakan (tanpa hasil)
                 for tc in tool_calls:
                     fname = tc["function"]["name"]
                     fargs = tc["function"]["arguments"]
-                    # pretty print args
                     try:
                         parsed = json.loads(fargs) if isinstance(fargs, str) else fargs
-                        fargs_str = json.dumps(parsed, ensure_ascii=False, indent=2)[:800]
                     except:
-                        fargs_str = str(fargs)[:800]
-                    self._log(f"  -> tool: {fname} {fargs_str}")
+                        parsed = {}
+                    # Format ringkas: Read blabla.txt, Write blabla.txt, Exec echo 'blabla'
+                    display = fname
+                    if fname == "read":
+                        display = f"Read {parsed.get('filePath','')}"
+                    elif fname == "write":
+                        display = f"Write {parsed.get('filePath','')}"
+                    elif fname == "edit":
+                        display = f"Edit {parsed.get('filePath','')}"
+                    elif fname == "glob":
+                        display = f"Glob {parsed.get('pattern','')}"
+                    elif fname == "grep":
+                        display = f"Grep {parsed.get('pattern','')}"
+                    elif fname == "bash":
+                        cmd = parsed.get('command','')[:60].replace('\n',' ')
+                        display = f"Exec {cmd}"
+                    elif fname == "skill_list":
+                        display = "Skill list"
+                    elif fname == "skill_load":
+                        display = f"Skill load {parsed.get('name','')}"
+                    else:
+                        display = fname
+                    self._log(display)
 
                 # Eksekusi tiap tool sequential dengan permission check
                 for tc in tool_calls:
@@ -130,7 +148,6 @@ class AgentLoop:
                     fargs = tc["function"]["arguments"]
                     # Permission gate untuk hardware tools
                     if self.permission_manager is not None:
-                        # pretty args untuk prompt
                         try:
                             parsed = json.loads(fargs) if isinstance(fargs, str) else fargs
                             prompt_args = json.dumps(parsed, ensure_ascii=False)[:300]
@@ -139,30 +156,22 @@ class AgentLoop:
                         allowed = self.permission_manager.check_or_prompt(fname, prompt_args)
                         if not allowed:
                             output = f"[DENIED] User menolak eksekusi tool '{fname}' dengan args {prompt_args}. Sampaikan ke user bahwa izin ditolak dan tawarkan alternatif."
-                            self._log(f"[tool {fname} DENIED by user]")
-                            self.context.add_tool_result(tid, fname, output)
-                            save_message(self.session_id, {"role": "tool", "tool_call_id": tid, "name": fname, "content": output})
+                            # Truncate untuk history ringan
+                            truncated = output[:4000] + ("\n...[truncated]" if len(output) > 4000 else "")
+                            self.context.add_tool_result(tid, fname, truncated)
+                            save_message(self.session_id, {"role": "tool", "tool_call_id": tid, "name": fname, "content": truncated})
                             continue
-                    self._log(f"[exec {fname}...]")
-                    t0 = time.time()
                     output = execute_tool(fname, fargs)
-                    dt = time.time() - t0
-                    self._log(f"[tool {fname} done {dt:.1f}s, {len(output)} chars]")
-                    # Masukkan ke context + history
-                    self.context.add_tool_result(tid, fname, output)
-                    save_message(self.session_id, {"role": "tool", "tool_call_id": tid, "name": fname, "content": output})
-                    # Juga print summary ke stdout jika verbose? Tidak, biar LLM saja yang ringkas.
-                    if self.verbose:
-                        # tampilkan preview 300 chars ke stderr
-                        preview = output[:600].replace("\n", " ")
-                        if len(output) > 600:
-                            preview += "..."
-                        self._log(f"     result preview: {preview}")
+                    # Truncate hasil panjang sebelum simpan - trade-off konteks perlu diulang tapi history tidak berat
+                    # Simpan max 4000 chars ke history & context, bukan full 20000
+                    if len(output) > 4000:
+                        truncated = output[:3500] + f"\n...[truncated {len(output)-3500} chars, total {len(output)}]...\n" + output[-500:]
+                        to_store = truncated[:4000]
+                    else:
+                        to_store = output
+                    self.context.add_tool_result(tid, fname, to_store)
+                    save_message(self.session_id, {"role": "tool", "tool_call_id": tid, "name": fname, "content": to_store})
 
-                # lanjut loop - LLM akan lihat tool results
-                if stream:
-                    # pemisah visual
-                    print(f"\n[tool results fed back, continuing...]\n", file=sys.stderr)
                 continue
         else:
             # max iterations tercapai
@@ -172,6 +181,13 @@ class AgentLoop:
                 final_answer = "[Agent stopped: max iterations reached without final answer]"
                 self.context.add_assistant(final_answer)
                 save_message(self.session_id, {"role": "assistant", "content": final_answer, "model": self.llm.model, "think_variant": _current_think()})
+
+        # Token usage hanya tampil ketika iter selesai (bukan saat berjalan)
+        try:
+            usage = self.context.token_usage()
+            self._log(f"[done] tokens {usage['tokens']}/{usage['max']} ({usage['percent']}%)")
+        except:
+            pass
 
         return final_answer
 
