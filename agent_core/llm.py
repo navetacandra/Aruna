@@ -115,8 +115,10 @@ class LLMClient:
                     if e.code == 429:
                         # 429 bukan kesalahan format, jangan fallback dulu, retry same provider
                         if attempt < 5:
-                            wait = 5 + (attempt - 1) * 3  # 5, 8, 11, 14, 17
-                            print(f"[429] {provider.name} {provider.url} rate limit (attempt {attempt}/5), retry after {wait}s...", file=sys.stderr)
+                            wait = 5 + (attempt - 1) * 3  # 5, 8, 11, 14
+                            # Format sesuai instruksi: "{error_message} {n} Retry on {x} seconds.."
+                            err_msg = body_txt.strip()[:200] if body_txt.strip() else msg
+                            print(f"{err_msg} {attempt} Retry on {wait} seconds..", file=sys.stderr)
                             try:
                                 time.sleep(wait)
                             except KeyboardInterrupt:

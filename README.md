@@ -149,7 +149,7 @@ Saved state di `.agent/llm_provider_state.json` dipakai pertama jika model sama;
 
 SSE parsing: Chat `data: {"choices":[{"delta":{"content":...}}]}` + `[DONE]`, Responses `event: response.output_text.delta` `data:{"delta":"..."}`, Anthropic `event: content_block_delta` `data:{"delta":{"text":...}}`/`input_json_delta`.
 
-**429 handling** `agent_core/llm.py:90`: Jika `429 Too Many Requests` jangan fallback ke SDK lain dulu (bukan kesalahan format). Retry same provider max 5 kali dengan backoff `5 + (n-1)*3` detik (5, 8, 11, 14, 17), baru fallback ke SDK lain setelah 5 gagal. `time.sleep` interruptible via Ctrl-C.
+**429 handling** `agent_core/llm.py:90`: Jika `429 Too Many Requests` jangan fallback ke SDK lain dulu (bukan kesalahan format). Retry same provider max 5 kali dengan backoff `5 + (n-1)*3` detik (5, 8, 11, 14), tampil `"{error_message} {n} Retry on {x} seconds.."` per attempt, baru fallback ke SDK lain setelah 5 gagal. `time.sleep` interruptible via Ctrl-C/ESC.
 
 Env: `OPENCODE_BASE_URL` (default `https://opencode.ai`), `OPENAI_API_KEY`/`ANTHROPIC_API_KEY` jika diperlukan (tetap via opencode proxy).
 
