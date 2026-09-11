@@ -1,4 +1,6 @@
-# AI Agent Sederhana - Tanpa TUI
+# Aruna — Agent Ringan Untuk Nalar & Aksi
+
+> **Aruna** (Sanskerta: अरुण) berarti *fajar kemerahan / cahaya awal matahari* — metafora agent yang menyingkap file dan konteks sebelum menalar & bertindak. Di sini **Aruna = Agent Ringan Untuk Nalar & Aksi**: `Ar` = Agent Ringan, `una` = Untuk Nalar & Aksi (ReAct loop + tool calling).
 
 Agent Python minimal tanpa external dependencies yang fokus pada **tool calling, filesystem, LLM API, Agent Loop & Context Manager**. Mengacu pada `opencode.js` sebagai provider utama (`https://opencode.ai`) dengan **fallback multi-SDK** (OpenAI `v1/chat/completions`, `v1/responses`, Anthropic `v1/messages`) dan state per-model.
 
