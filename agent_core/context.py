@@ -60,7 +60,12 @@ class ContextManager:
         self.messages.append(msg)
 
     def add_tool_result(self, tool_call_id: str, name: str, content: str):
-        # Batalkan truncate - simpan full output (sesuai instruksi)
+        # Truncate cerdas - hemat token 50-70% tapi pertahankan head+tail penting
+        if len(content) > MAX_TOOL_OUTPUT_CHARS:
+            head = int(MAX_TOOL_OUTPUT_CHARS * 0.6)
+            tail = MAX_TOOL_OUTPUT_CHARS - head - 100
+            notice = f"\n...[TRUNCATED cerdas {len(content)-MAX_TOOL_OUTPUT_CHARS} chars]...\n"
+            content = content[:head] + notice + content[-tail:] if tail > 0 else content[:MAX_TOOL_OUTPUT_CHARS]
         self.messages.append({
             "role": "tool",
             "tool_call_id": tool_call_id,

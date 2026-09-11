@@ -148,8 +148,15 @@ TOOL_DEFINITIONS: List[Dict[str, Any]] = [
 # ---------- Implementasi ----------
 
 def _truncate(s: str, max_chars: int = MAX_TOOL_OUTPUT_CHARS) -> str:
-    # Batalkan truncate - simpan full sesuai instruksi (history ringan trade-off dihapus)
-    return s
+    # Truncate cerdas - hemat token tapi pertahankan head + tail penting
+    if len(s) <= max_chars:
+        return s
+    # Untuk output tool panjang, simpan head + tail dengan notice di tengah
+    # Head 60% + tail 40% agar header dan awal file (yang penting) tetap ada
+    head_len = int(max_chars * 0.6)
+    tail_len = max_chars - head_len - 100  # 100 untuk notice
+    notice = f"\n\n...[TRUNCATED cerdas {len(s)-max_chars} chars, total {len(s)} -> {max_chars} (hemat {(1-max_chars/len(s))*100:.0f}%)]...\n\n"
+    return s[:head_len] + notice + s[-tail_len:] if tail_len > 0 else s[:max_chars] + notice
 
 def tool_read(filePath: str, offset: int = 1, limit: int = 2000) -> str:
     p = pathlib.Path(filePath)
