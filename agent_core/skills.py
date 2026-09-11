@@ -42,7 +42,9 @@ def _parse_skill_file(path: pathlib.Path) -> Dict[str, str]:
         description = content[:120].strip().replace("\n"," ")
     return {"name": name, "description": description, "content": content.strip(), "path": str(path)}
 
-def discover_skills(skills_dir: str = SKILLS_DIR) -> Dict[str, Dict[str, str]]:
+def discover_skills(skills_dir: str = None) -> Dict[str, Dict[str, str]]:
+    if skills_dir is None:
+        skills_dir = SKILLS_DIR
     base = pathlib.Path(skills_dir)
     skills: Dict[str, Dict[str, str]] = {}
     if not base.exists():
@@ -63,7 +65,9 @@ def discover_skills(skills_dir: str = SKILLS_DIR) -> Dict[str, Dict[str, str]]:
         skills[key] = info
     return skills
 
-def list_skills(skills_dir: str = SKILLS_DIR) -> str:
+def list_skills(skills_dir: str = None) -> str:
+    if skills_dir is None:
+        skills_dir = SKILLS_DIR
     skills = discover_skills(skills_dir)
     if not skills:
         return f"(no skills) direktori {skills_dir} kosong atau tidak ada. Buat folder .agent/skills/<nama>/SKILL.md untuk menambah skill."
@@ -73,7 +77,9 @@ def list_skills(skills_dir: str = SKILLS_DIR) -> str:
     lines.append("\nGunakan skill_load(name) untuk memuat panduan lengkap.")
     return "\n".join(lines)
 
-def load_skill(name: str, skills_dir: str = SKILLS_DIR) -> str:
+def load_skill(name: str, skills_dir: str = None) -> str:
+    if skills_dir is None:
+        skills_dir = SKILLS_DIR
     skills = discover_skills(skills_dir)
     # case-insensitive
     key = None
@@ -87,7 +93,9 @@ def load_skill(name: str, skills_dir: str = SKILLS_DIR) -> str:
     header = f"# Skill: {info['name']}\nPath: {info['path']}\nDescription: {info['description']}\n\n"
     return header + info["content"]
 
-def build_skills_catalog(skills_dir: str = SKILLS_DIR) -> str:
+def build_skills_catalog(skills_dir: str = None) -> str:
+    if skills_dir is None:
+        skills_dir = SKILLS_DIR
     skills = discover_skills(skills_dir)
     if not skills:
         return ""

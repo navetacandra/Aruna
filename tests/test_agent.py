@@ -193,8 +193,10 @@ class MockLLM:
         # responses: list of dicts {content, tool_calls}
         self.responses = list(responses)
         self.calls = []
-    def chat(self, messages, tools=None, stream=False, on_delta=None, timeout=120):
+        self.extra_bodies = []
+    def chat(self, messages, tools=None, stream=False, on_delta=None, on_tool_delta=None, extra_body=None, timeout=120):
         self.calls.append(messages)
+        self.extra_bodies.append(extra_body)
         if not self.responses:
             return {"content": "done", "tool_calls": None, "finish_reason": "stop"}
         r = self.responses.pop(0)
@@ -273,6 +275,176 @@ class TestAgentLoop(unittest.TestCase):
             self.assertEqual(len(mock.calls), 3)
         finally:
             hist_mod.HISTS_DIR = orig
+
+class TestPermissions(unittest.TestCase):
+    def test_modes(self):
+        from agent_core.permissions import PermissionManager
+        pm = PermissionManager("ask")
+        self.assertFalse(pm.is_auto_allowed("read"))
+        self.assertFalse(pm.is_auto_allowed("bash"))
+        self.assertTrue(pm.is_auto_allowed("skill_list"))
+        self.assertTrue(pm.is_auto_allowed("skill_load"))
+        pm.set_mode("accept-all")
+        self.assertTrue(pm.is_auto_allowed("read"))
+        self.assertTrue(pm.is_auto_allowed("bash"))
+        pm.set_mode("accept-fs")
+        self.assertTrue(pm.is_auto_allowed("read"))
+        self.assertTrue(pm.is_auto_allowed("write"))
+        self.assertTrue(pm.is_auto_allowed("glob"))
+        self.assertFalse(pm.is_auto_allowed("bash"))
+
+    def test_permission_gate_loop(self):
+        # Test loop menghormati deny
+        from agent_core.permissions import PermissionManager
+        pm = PermissionManager("ask")
+        # monkey patch prompt to deny
+        pm.prompt = lambda n, a: False
+        ctx = ContextManager(system_prompt="sys")
+        f = tempfile.NamedTemporaryFile(delete=False, mode='w', suffix='.txt')
+        f.write("secret")
+        f.close()
+        pathlib.Path(f.name).write_text("secret123", encoding="utf-8")
+        mock = MockLLM([
+            {"content": "", "tool_calls": [{"id":"c1","type":"function","function":{"name":"read","arguments": json.dumps({"filePath": f.name})}}], "finish_reason":"tool_calls"},
+            {"content": "denied handled", "tool_calls": None, "finish_reason":"stop"}
+        ])
+        import agent_core.history as hist_mod
+        orig = hist_mod.HISTS_DIR
+        tmp = tempfile.TemporaryDirectory()
+        hist_mod.HISTS_DIR = tmp.name
+        try:
+            loop = AgentLoop(llm=mock, context=ctx, session_id=hist_sid(), verbose=False, permission_manager=pm)
+            ans = loop.run("baca", stream=False)
+            # tool harus DENIED, loop tetap lanjut dan final answer ada
+            self.assertIn("denied handled", ans)
+            # cek ada tool result DENIED di context
+            tool_msgs = [m for m in ctx.messages if m.get("role")=="tool"]
+            self.assertTrue(any("DENIED" in m.get("content","") for m in tool_msgs))
+        finally:
+            hist_mod.HISTS_DIR = orig
+            tmp.cleanup()
+            os.unlink(f.name)
+
+    def test_accept_fs_loop(self):
+        from agent_core.permissions import PermissionManager
+        pm = PermissionManager("accept-fs")
+        ctx = ContextManager(system_prompt="sys")
+        tmp = tempfile.TemporaryDirectory()
+        base = pathlib.Path(tmp.name)
+        f = base / "a.txt"
+        f.write_text("hi", encoding="utf-8")
+        mock = MockLLM([
+            {"content": "", "tool_calls": [{"id":"c1","type":"function","function":{"name":"read","arguments": json.dumps({"filePath": str(f)})}}], "finish_reason":"tool_calls"},
+            {"content": "ok", "tool_calls": None, "finish_reason":"stop"}
+        ])
+        import agent_core.history as hist_mod
+        orig = hist_mod.HISTS_DIR
+        hist_mod.HISTS_DIR = tmp.name
+        try:
+            loop = AgentLoop(llm=mock, context=ctx, session_id=hist_sid(), verbose=False, permission_manager=pm)
+            ans = loop.run("read", stream=False)
+            self.assertIn("ok", ans)
+        finally:
+            hist_mod.HISTS_DIR = orig
+            tmp.cleanup()
+
+class TestCommands(unittest.TestCase):
+    def test_compact_command(self):
+        from agent_core.context import ContextManager
+        ctx = ContextManager(system_prompt="sys", max_tokens=500, keep_recent=2)
+        for i in range(10):
+            ctx.add_user("x"*200)
+            ctx.add_assistant("y"*200)
+        before = ctx.token_usage()["tokens"]
+        from agent import handle_compact
+        handle_compact(ctx)
+        after = ctx.token_usage()["tokens"]
+        self.assertLess(after, before)
+        self.assertIn("COMPACTED", ctx.messages[1]["content"])
+
+    def test_model_switch(self):
+        from agent import handle_model
+        from agent_core.llm import LLMClient
+        llm = LLMClient(model="mimo-v2.5-free")
+        handle_model("muse-spark-1.2-contributor-free", llm)
+        self.assertEqual(llm.model, "muse-spark-1.2-contributor-free")
+
+    def test_usage(self):
+        from agent import handle_usage
+        ctx = ContextManager(system_prompt="sys")
+        ctx.add_user("hello")
+        # should not raise
+        handle_usage(ctx)
+
+    def test_skill_handlers(self):
+        from agent import handle_skill
+        # buat temp skill dir
+        tmp = tempfile.TemporaryDirectory()
+        base = pathlib.Path(tmp.name) / ".agent" / "skills" / "demo"
+        base.mkdir(parents=True)
+        (base / "SKILL.md").write_text("# Demo\nskill demo", encoding="utf-8")
+        import agent_core.skills as skmod
+        orig = skmod.SKILLS_DIR
+        skmod.SKILLS_DIR = str(pathlib.Path(tmp.name)/ ".agent/skills")
+        try:
+            handle_skill("")
+            handle_skill("demo")
+        finally:
+            skmod.SKILLS_DIR = orig
+            tmp.cleanup()
+
+    def test_think(self):
+        from agent import handle_think
+        from agent_core.llm import LLMClient
+        from agent_core.loop import AgentLoop
+        from agent_core.context import ContextManager
+        llm = LLMClient(model="mimo-v2.5-free")
+        ctx = ContextManager(system_prompt="sys")
+        loop = AgentLoop(llm=llm, context=ctx, session_id=hist_sid(), verbose=False)
+        # non-support model should return current
+        v = handle_think("", llm, loop, "none")
+        self.assertEqual(v, "none")
+        v2 = handle_think("medium", llm, loop, "none")
+        # mimo tidak support, tetap none tapi warn
+        # set ke muse-spark
+        llm.model = "muse-spark-1.2-contributor-free"
+        v3 = handle_think("medium", llm, loop, "none")
+        self.assertEqual(v3, "medium")
+        self.assertEqual(loop.extra_body.get("reasoning_effort"), "medium")
+        v4 = handle_think("none", llm, loop, v3)
+        self.assertEqual(v4, "none")
+        self.assertNotIn("reasoning_effort", loop.extra_body)
+
+    def test_tool_call(self):
+        from agent import handle_tool_call
+        from agent_core.permissions import PermissionManager
+        pm = PermissionManager("ask")
+        handle_tool_call("accept-all", pm)
+        self.assertEqual(pm.mode, "accept-all")
+        handle_tool_call("accept-fs", pm)
+        self.assertEqual(pm.mode, "accept-fs")
+        handle_tool_call("ask", pm)
+        self.assertEqual(pm.mode, "ask")
+
+    def test_shell_escape(self):
+        from agent import run_shell_direct
+        # should not raise, run echo
+        run_shell_direct("echo shelltest123")
+
+    def test_reload(self):
+        from agent import handle_reload
+        from agent_core.context import ContextManager
+        from agent_core.llm import LLMClient
+        from agent_core.permissions import PermissionManager
+        from agent_core.loop import AgentLoop
+        ctx = ContextManager(system_prompt="sys")
+        ctx.add_user("hi")
+        llm = LLMClient(model="mimo-v2.5-free")
+        pm = PermissionManager("ask")
+        loop = AgentLoop(llm=llm, context=ctx, session_id=hist_sid(), verbose=False)
+        handle_reload(ctx, llm, pm, "none")
+        self.assertEqual(ctx.messages[1]["content"], "hi")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

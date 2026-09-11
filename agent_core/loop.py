@@ -10,6 +10,11 @@ from .history import save_message
 from .llm import LLMClient
 from .tools import execute_tool, get_tool_definitions
 
+try:
+    from .permissions import PermissionManager
+except ImportError:
+    PermissionManager = None
+
 
 class AgentLoop:
     def __init__(self,
@@ -17,13 +22,17 @@ class AgentLoop:
                  context: ContextManager,
                  session_id: str,
                  max_iterations: int = MAX_ITERATIONS,
-                 verbose: bool = True):
+                 verbose: bool = True,
+                 permission_manager=None,
+                 extra_body: dict = None):
         self.llm = llm
         self.context = context
         self.session_id = session_id
         self.max_iterations = max_iterations
         self.verbose = verbose
         self.tool_defs = get_tool_definitions()
+        self.permission_manager = permission_manager
+        self.extra_body = extra_body or {}
 
     def _log(self, s: str):
         if self.verbose:
@@ -47,13 +56,14 @@ class AgentLoop:
                     sys.stdout.write(tok)
                     sys.stdout.flush()
 
-            # Panggil LLM
+            # Panggil LLM dengan extra_body (mis. reasoning_effort untuk thinking)
             try:
                 result = self.llm.chat(
                     messages,
                     tools=self.tool_defs,
                     stream=stream,
                     on_delta=on_delta if stream else None,
+                    extra_body=self.extra_body if self.extra_body else None,
                     timeout=120
                 )
             except Exception as e:
@@ -101,11 +111,26 @@ class AgentLoop:
                         fargs_str = str(fargs)[:800]
                     self._log(f"  -> tool: {fname} {fargs_str}")
 
-                # Eksekusi tiap tool sequential
+                # Eksekusi tiap tool sequential dengan permission check
                 for tc in tool_calls:
                     tid = tc.get("id", f"call_{iteration}")
                     fname = tc["function"]["name"]
                     fargs = tc["function"]["arguments"]
+                    # Permission gate untuk hardware tools
+                    if self.permission_manager is not None:
+                        # pretty args untuk prompt
+                        try:
+                            parsed = json.loads(fargs) if isinstance(fargs, str) else fargs
+                            prompt_args = json.dumps(parsed, ensure_ascii=False)[:300]
+                        except:
+                            prompt_args = str(fargs)[:300]
+                        allowed = self.permission_manager.check_or_prompt(fname, prompt_args)
+                        if not allowed:
+                            output = f"[DENIED] User menolak eksekusi tool '{fname}' dengan args {prompt_args}. Sampaikan ke user bahwa izin ditolak dan tawarkan alternatif."
+                            self._log(f"[tool {fname} DENIED by user]")
+                            self.context.add_tool_result(tid, fname, output)
+                            save_message(self.session_id, {"role": "tool", "tool_call_id": tid, "name": fname, "content": output})
+                            continue
                     self._log(f"[exec {fname}...]")
                     t0 = time.time()
                     output = execute_tool(fname, fargs)
