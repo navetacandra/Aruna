@@ -148,10 +148,8 @@ TOOL_DEFINITIONS: List[Dict[str, Any]] = [
 # ---------- Implementasi ----------
 
 def _truncate(s: str, max_chars: int = MAX_TOOL_OUTPUT_CHARS) -> str:
-    if len(s) <= max_chars:
-        return s
-    half = max_chars // 2
-    return s[:half] + f"\n\n...[TRUNCATED {len(s)-max_chars} chars, total {len(s)}]...\n\n" + s[-half:]
+    # Batalkan truncate - simpan full sesuai instruksi (history ringan trade-off dihapus)
+    return s
 
 def tool_read(filePath: str, offset: int = 1, limit: int = 2000) -> str:
     p = pathlib.Path(filePath)

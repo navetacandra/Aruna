@@ -47,6 +47,7 @@ class AgentLoop:
             return self.extra_body.get("reasoning_effort") if self.extra_body else "none"
 
         final_answer = ""
+        start_time = time.time()
 
         for iteration in range(1, self.max_iterations + 1):
             messages = self.context.get_messages()
@@ -110,38 +111,18 @@ class AgentLoop:
                 self.context.add_assistant(content, tool_calls)
                 save_message(self.session_id, {"role": "assistant", "content": content, "tool_calls": tool_calls, "model": self.llm.model, "think_variant": _current_think()})
 
-                # Tampilkan hanya apa yang dikerjakan (tanpa hasil)
+                # Tampilkan hanya apa yang dikerjakan: ">>>> {Type} {args}" tanpa hasil
                 for tc in tool_calls:
                     fname = tc["function"]["name"]
                     fargs = tc["function"]["arguments"]
-                    try:
-                        parsed = json.loads(fargs) if isinstance(fargs, str) else fargs
-                    except:
-                        parsed = {}
-                    # Format ringkas: Read blabla.txt, Write blabla.txt, Exec echo 'blabla'
-                    display = fname
-                    if fname == "read":
-                        display = f"Read {parsed.get('filePath','')}"
-                    elif fname == "write":
-                        display = f"Write {parsed.get('filePath','')}"
-                    elif fname == "edit":
-                        display = f"Edit {parsed.get('filePath','')}"
-                    elif fname == "glob":
-                        display = f"Glob {parsed.get('pattern','')}"
-                    elif fname == "grep":
-                        display = f"Grep {parsed.get('pattern','')}"
-                    elif fname == "bash":
-                        cmd = parsed.get('command','')[:60].replace('\n',' ')
-                        display = f"Exec {cmd}"
-                    elif fname == "skill_list":
-                        display = "Skill list"
-                    elif fname == "skill_load":
-                        display = f"Skill load {parsed.get('name','')}"
+                    # fargs sudah JSON string, tampilkan apa adanya
+                    if isinstance(fargs, str):
+                        args_str = fargs
                     else:
-                        display = fname
-                    self._log(display)
+                        args_str = json.dumps(fargs, ensure_ascii=False)
+                    self._log(f">>>> {fname} {args_str}")
 
-                # Eksekusi tiap tool sequential dengan permission check
+                # Eksekusi tiap tool sequential dengan permission check - Batalkan truncate, simpan full
                 for tc in tool_calls:
                     tid = tc.get("id", f"call_{iteration}")
                     fname = tc["function"]["name"]
@@ -156,21 +137,14 @@ class AgentLoop:
                         allowed = self.permission_manager.check_or_prompt(fname, prompt_args)
                         if not allowed:
                             output = f"[DENIED] User menolak eksekusi tool '{fname}' dengan args {prompt_args}. Sampaikan ke user bahwa izin ditolak dan tawarkan alternatif."
-                            # Truncate untuk history ringan
-                            truncated = output[:4000] + ("\n...[truncated]" if len(output) > 4000 else "")
-                            self.context.add_tool_result(tid, fname, truncated)
-                            save_message(self.session_id, {"role": "tool", "tool_call_id": tid, "name": fname, "content": truncated})
+                            # Batalkan truncate - simpan full history
+                            self.context.add_tool_result(tid, fname, output)
+                            save_message(self.session_id, {"role": "tool", "tool_call_id": tid, "name": fname, "content": output})
                             continue
                     output = execute_tool(fname, fargs)
-                    # Truncate hasil panjang sebelum simpan - trade-off konteks perlu diulang tapi history tidak berat
-                    # Simpan max 4000 chars ke history & context, bukan full 20000
-                    if len(output) > 4000:
-                        truncated = output[:3500] + f"\n...[truncated {len(output)-3500} chars, total {len(output)}]...\n" + output[-500:]
-                        to_store = truncated[:4000]
-                    else:
-                        to_store = output
-                    self.context.add_tool_result(tid, fname, to_store)
-                    save_message(self.session_id, {"role": "tool", "tool_call_id": tid, "name": fname, "content": to_store})
+                    # Batalkan truncate - simpan full output ke context & history
+                    self.context.add_tool_result(tid, fname, output)
+                    save_message(self.session_id, {"role": "tool", "tool_call_id": tid, "name": fname, "content": output})
 
                 continue
         else:
@@ -182,10 +156,16 @@ class AgentLoop:
                 self.context.add_assistant(final_answer)
                 save_message(self.session_id, {"role": "assistant", "content": final_answer, "model": self.llm.model, "think_variant": _current_think()})
 
-        # Token usage hanya tampil ketika iter selesai (bukan saat berjalan)
+        # Token usage & iter & time hanya tampil ketika iter selesai (bukan saat berjalan)
         try:
             usage = self.context.token_usage()
-            self._log(f"[done] tokens {usage['tokens']}/{usage['max']} ({usage['percent']}%)")
+            elapsed = time.time() - start_time
+            h = int(elapsed // 3600)
+            m = int((elapsed % 3600) // 60)
+            s = int(elapsed % 60)
+            # n = total iter yang dijalankan (iteration terakhir)
+            n = iteration if 'iteration' in locals() else self.max_iterations
+            self._log(f"[Total Iter: {n} | Token: {usage['tokens']}/{usage['max']} {usage['percent']}% | Time: {h}h {m}m {s}s]")
         except:
             pass
 

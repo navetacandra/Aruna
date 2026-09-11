@@ -59,12 +59,13 @@ class TestContextManager(unittest.TestCase):
         self.assertEqual(len(msgs), 1 + 1 + 2)  # system + summary + 2 recent
 
     def test_truncate_tool_output(self):
+        # Truncate dibatalkan - simpan full
         ctx = ContextManager(system_prompt="sys", max_tokens=100000)
         big = "a"* (MAX_TOOL_OUTPUT_CHARS + 5000)
         ctx.add_tool_result("call_1", "bash", big)
         last = ctx.messages[-1]
-        self.assertLess(len(last["content"]), len(big))
-        self.assertIn("TRUNCATED", last["content"])
+        self.assertEqual(len(last["content"]), len(big))
+        self.assertNotIn("TRUNCATED", last["content"])
 
     def test_token_usage(self):
         ctx = ContextManager(system_prompt="sys")
