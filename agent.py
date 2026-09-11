@@ -115,15 +115,13 @@ def handle_model(arg: str, llm: LLMClient, base_url=None):
     except Exception as e:
         print(f"Error fetch models: {e}", file=sys.stderr)
         return
-    # tampilkan 20 teratas, tapi simpan semua untuk pemilihan
-    display = models[:20]
-    print(f"Found {len(models)} models (menampilkan 20):", file=sys.stderr)
+    # tampilkan SEMUA models agar pengguna dapat memilih
+    display = models
+    print(f"Found {len(models)} models (menampilkan semua):", file=sys.stderr)
     for i, m in enumerate(display, 1):
         cur = " * current" if m.get("id")==llm.model else ""
-        print(f" {i:2}. {m.get('id')} ({m.get('owned_by','')}){cur}", file=sys.stderr)
-    if len(models) > 20:
-        print(f" ...(+{len(models)-20} more, ketik nama lengkap untuk memilih)", file=sys.stderr)
-    print("Pilih model [1-20, atau ketik nama lengkap, Enter untuk batal]: ", end="", file=sys.stderr, flush=True)
+        print(f" {i:3}. {m.get('id')} ({m.get('owned_by','')}){cur}", file=sys.stderr)
+    print("Pilih model [1-{}, atau ketik nama lengkap, Enter untuk batal]: ".format(len(display)), end="", file=sys.stderr, flush=True)
     try:
         choice = input().strip()
     except (EOFError, KeyboardInterrupt):
@@ -259,11 +257,9 @@ def main():
         print("Fetching models from opencode.ai...", file=sys.stderr)
         try:
             models = fetch_models(base_url=args.base_url) if args.base_url else fetch_models()
-            print(f"Found {len(models)} models:")
-            for m in models[:30]:
+            print(f"Found {len(models)} models (semua):")
+            for m in models:
                 print(f" - {m.get('id')}  ({m.get('owned_by','')})")
-            if len(models) > 30:
-                print(f"...(+{len(models)-30} more)")
         except Exception as e:
             print(f"Error fetch models: {e}", file=sys.stderr)
             sys.exit(1)
