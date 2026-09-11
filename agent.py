@@ -265,12 +265,14 @@ def handle_tool_call(arg: str, pm: PermissionManager):
     pm.set_mode(arg)
     print(f"[tool-call] mode -> {pm.status()}", file=sys.stderr)
 
-def handle_info(ctx: ContextManager, llm: LLMClient, think_variant: str):
+def handle_info(ctx: ContextManager, llm: LLMClient, think_variant: str, session_id: str = ""):
     u = ctx.token_usage()
     total_msgs = len(ctx.messages)
     # user_message_len: jumlah pesan user (atau total tanpa system)
     user_msgs = sum(1 for m in ctx.messages if m.get("role") == "user")
-    # Format sesuai instruksi: Model: model_name [variant] / Token: {used}/{quota} {percent}% / Message: {user_message_len}
+    # Format sesuai instruksi: Session Id paling atas, lalu Model, Token, Message
+    if session_id:
+        print(f"Session Id: {session_id}", file=sys.stderr)
     print(f"Model: {llm.model} [{think_variant}]", file=sys.stderr)
     print(f"Token: {u['tokens']}/{u['max']} {u['percent']}%", file=sys.stderr)
     print(f"Message: {user_msgs} (total {total_msgs}, system 1)", file=sys.stderr)
@@ -468,7 +470,7 @@ def main():
 
         # /info
         if low == "/info" or low.startswith("/info "):
-            handle_info(ctx, llm, think_variant)
+            handle_info(ctx, llm, think_variant, session_id)
             continue
 
         # Legacy & helpers
