@@ -59,7 +59,7 @@ class AgentLoop:
                     sys.stdout.write(tok)
                     sys.stdout.flush()
 
-            # Panggil LLM dengan extra_body (mis. reasoning_effort untuk thinking)
+            # Panggil LLM dengan extra_body (mis. reasoning_effort untuk thinking) - escape (Ctrl-C/ESC) membatalkan
             try:
                 result = self.llm.chat(
                     messages,
@@ -69,6 +69,15 @@ class AgentLoop:
                     extra_body=self.extra_body if self.extra_body else None,
                     timeout=120
                 )
+            except KeyboardInterrupt:
+                # Escape membatalkan response - jangan simpan partial ke context/history
+                print("\n[escape] response dibatalkan", file=sys.stderr)
+                try:
+                    sys.stdout.write("\n")
+                    sys.stdout.flush()
+                except:
+                    pass
+                return "[cancelled - escape]"
             except Exception as e:
                 err = f"[LLM error iter {iteration}: {e}]"
                 print(f"\n{err}", file=sys.stderr)

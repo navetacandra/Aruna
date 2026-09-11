@@ -91,16 +91,19 @@ class LLMClient:
         for provider in candidates:
             # Untuk 429, retry same provider hingga 5 kali dengan backoff 5 + (n-1)*3
             # Jika 429, jangan fallback ke SDK lain dulu, cek dulu karena bukan kesalahan format
+            # Escape (Ctrl-C / ESC) membatalkan response - jangan retry, langsung batal
             for attempt in range(1, 6):
                 try:
                     result = self._chat_with_provider(provider, messages, tools, extra_body, stream, on_delta, on_tool_delta, timeout)
-                    # simpan state sukses untuk model yang sama (akan dipakai lagi)
+                    # simpan state sukses untuk model yang sama (akan dipakai lagi) - tanpa log mengganggu
                     try:
                         update_provider_state(self.model, provider.sdk, provider.endpoint, provider.base_url)
-                        print(f"[provider] using {provider.sdk} {provider.url} for {self.model}", file=sys.stderr)
                     except:
                         pass
                     return result
+                except KeyboardInterrupt:
+                    print("\n[escape] response dibatalkan (Ctrl-C / ESC)", file=sys.stderr)
+                    raise
                 except urllib.error.HTTPError as e:
                     body_txt = ""
                     try:

@@ -349,6 +349,78 @@ class TestPermissions(unittest.TestCase):
             hist_mod.HISTS_DIR = orig
             tmp.cleanup()
 
+    def test_escape_cancels_response(self):
+        # Simulasi escape (Ctrl-C) saat llm.chat dipanggil
+        class MockLLMEscape:
+            model = "mimo-v2.5-free"
+            def chat(self, *a, **kw):
+                raise KeyboardInterrupt("escape")
+        ctx = ContextManager(system_prompt="sys")
+        tmp = tempfile.TemporaryDirectory()
+        import agent_core.history as hist_mod
+        orig = hist_mod.HISTS_DIR
+        hist_mod.HISTS_DIR = tmp.name
+        try:
+            loop = AgentLoop(llm=MockLLMEscape(), context=ctx, session_id=hist_sid(), verbose=False)
+            ans = loop.run("hi", stream=True)
+            self.assertIn("cancelled", ans.lower())
+            # Pastikan tidak ada assistant message "cancelled" disimpan sebagai error, tapi sebagai cancelled
+            raw = hist_mod.load_history(loop.session_id)
+            # history harus hanya user, tidak ada assistant yang error panjang, tapi ada cancelled?
+            # Kita cek bahwa assistant tidak disimpan sebagai err, tapi loop mengembalikan cancelled tanpa simpan partial
+            # Saat ini loop mengembalikan [cancelled] tanpa save ke history (hanya user), cek
+            self.assertTrue(any(r.get("role")=="user" for r in raw))
+            # assistant cancelled tidak disimpan sebagai tool, tapi sebagai return value saja
+            # Pastikan tidak ada "LLM error" di history
+            self.assertFalse(any("LLM error" in r.get("content","") for r in raw))
+        finally:
+            hist_mod.HISTS_DIR = orig
+            tmp.cleanup()
+
+    def test_provider_log_not_shown(self):
+        # Pastikan [provider] using tidak tampil di stderr pada success (mengganggu)
+        from agent_core.llm import LLMClient
+        import urllib.request, json, io, sys
+        from io import StringIO
+        orig_stderr = sys.stderr
+        captured = StringIO()
+        sys.stderr = captured
+        orig_urlopen = urllib.request.urlopen
+        def fake_urlopen(req, timeout=120):
+            class FakeResp:
+                def __enter__(self): return self
+                def __exit__(self,*a): return False
+                def read(self, *a, **kw):
+                    return json.dumps({"choices":[{"message":{"content":"ok","tool_calls":None},"finish_reason":"stop"}]}).encode()
+            return FakeResp()
+        import agent_core.providers as prov_mod
+        orig_state = prov_mod.PROVIDER_STATE_FILE
+        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".json")
+        tmp.close()
+        prov_mod.PROVIDER_STATE_FILE = tmp.name
+        urllib.request.urlopen = fake_urlopen
+        try:
+            client = LLMClient(model="mimo-v2.5-free")
+            # only one candidate
+            orig_build = prov_mod.build_candidate_providers
+            def only_one(m,b=None):
+                return [prov_mod.ProviderSpec("opencode_chat","https://opencode.ai","/zen/v1/chat/completions","openai_chat")]
+            prov_mod.build_candidate_providers = only_one
+            import agent_core.llm as llm_mod
+            orig_build_llm = llm_mod.build_candidate_providers
+            llm_mod.build_candidate_providers = only_one
+            client.chat([{"role":"user","content":"hi"}], stream=False)
+            out = captured.getvalue()
+            self.assertNotIn("[provider] using", out)
+        finally:
+            sys.stderr = orig_stderr
+            urllib.request.urlopen = orig_urlopen
+            prov_mod.build_candidate_providers = orig_build
+            llm_mod.build_candidate_providers = orig_build_llm
+            prov_mod.PROVIDER_STATE_FILE = orig_state
+            try: os.unlink(tmp.name)
+            except: pass
+
 class TestCommands(unittest.TestCase):
     def test_compact_command(self):
         from agent_core.context import ContextManager

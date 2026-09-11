@@ -7,3 +7,4 @@ venv/
 .agent/hists/*.jsonl
 !.agent/hists/.gitkeep
 .agent/llm_provider_state.json
+nul
