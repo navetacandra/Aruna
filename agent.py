@@ -17,6 +17,7 @@ Commands REPL:
   /think [variant]         lihat/pilih thinking variant (none/low/medium/high/xhigh)
   /tool-call [mode]        izin tool: accept-all, accept-fs, ask
   /info                    tampilkan model, token, panjang chat
+  @nama_file               embed file (text/binary pdf/foto) ke prompt, cth: @README.md @\"my file.pdf\"
   !<command>               jalankan shell langsung (terminatable via Ctrl-C)
   /help, /clear, /session, /exit
 """
@@ -41,6 +42,112 @@ from agent_core.permissions import PermissionManager
 
 THINK_VARIANTS = ["none", "low", "medium", "high", "xhigh"]  # none = non-thinking, xhigh = extra high
 DEFAULT_THINK = "none"
+
+# Untuk @file embedding
+import re
+import base64
+import mimetypes
+
+def _is_binary_file(path: pathlib.Path) -> bool:
+    # Deteksi binary via ekstensi atau coba baca
+    bin_exts = {".pdf", ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".ico", ".zip", ".tar", ".gz", ".exe", ".bin", ".docx", ".xlsx", ".pptx"}
+    if path.suffix.lower() in bin_exts:
+        return True
+    try:
+        with open(path, "rb") as f:
+            chunk = f.read(8000)
+            if b"\x00" in chunk:
+                return True
+            # coba decode
+            chunk.decode("utf-8")
+            return False
+    except:
+        return True
+
+def _handle_binary_file(path: pathlib.Path) -> str:
+    size = path.stat().st_size if path.exists() else 0
+    mime, _ = mimetypes.guess_type(str(path))
+    mime = mime or "application/octet-stream"
+    ext = path.suffix.lower()
+    header = f"[Binary file: {path} | type: {mime} | size: {size} bytes]"
+    # Untuk gambar, beri info tambahan
+    if ext in (".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"):
+        return f"{header}\n[Image file - tidak dapat ditampilkan langsung sebagai teks. Gunakan tool 'read' untuk metadata atau deskripsikan. Jika model vision, file tersedia di path tersebut.]"
+    if ext == ".pdf":
+        # Coba ekstrak teks sederhana tanpa deps: cari teks di antara () atau < >
+        try:
+            data = path.read_bytes()
+            # Cari teks yang mungkin ada di PDF (sederhana, tidak sempurna)
+            # PDF text sering ada di dalam () atau <FEFF...>
+            text_parts = re.findall(rb"\(([^\)]{4,200})\)", data)
+            texts = []
+            for t in text_parts[:20]:  # ambil 20 pertama
+                try:
+                    s = t.decode("utf-8", errors="ignore").strip()
+                    if len(s) > 4 and not s.startswith("/") and not s.startswith("D:"):
+                        texts.append(s)
+                except:
+                    continue
+            if texts:
+                preview = "\n".join(texts[:10])
+                return f"{header}\n[PDF preview (ekstrak sederhana, mungkin tidak lengkap):]\n{preview[:2000]}"
+            else:
+                return f"{header}\n[PDF file - gunakan tool 'read' atau 'bash' untuk proses lebih lanjut. Tidak ada teks terdeteksi dengan parser sederhana.]"
+        except Exception as e:
+            return f"{header}\n[PDF file - error baca: {e}]"
+    # Untuk binary lain, coba base64 preview kecil
+    try:
+        data = path.read_bytes()[:3000]
+        b64 = base64.b64encode(data).decode("ascii")
+        preview = b64[:500] + ("..." if len(data) == 3000 else "")
+        return f"{header}\n[Binary preview base64 (3000 bytes pertama): {preview}]"
+    except Exception as e:
+        return f"{header}\n[Binary file - error: {e}]"
+
+def expand_at_mentions(user_input: str) -> str:
+    """Deteksi @filepath di input, embed file content. Support @\"path dengan spasi\" dan @path."""
+    # Pattern: @ diikuti path tanpa spasi atau dengan quote
+    # Contoh: @README.md, @"my file.txt", @agent_core/tools.py, @/tmp/test.pdf
+    pattern = r'@(?:"([^"]+)"|\'([^\']+)\'|([^\s]+))'
+    def repl(match):
+        raw = match.group(1) or match.group(2) or match.group(3)
+        if not raw:
+            return match.group(0)
+        p = pathlib.Path(raw)
+        # Jika path relatif dan tidak ada, coba relative ke cwd
+        if not p.exists():
+            # Coba tanpa @, mungkin ada typo
+            return f"{match.group(0)} [file tidak ditemukan: {raw}]"
+        try:
+            if p.is_dir():
+                try:
+                    entries = sorted(os.listdir(p))
+                    preview = ", ".join(entries[:20])
+                    if len(entries) > 20:
+                        preview += f" ... (+{len(entries)-20} lagi)"
+                    return f"[Dir: {p} | {len(entries)} entries]\n{preview}"
+                except Exception as e:
+                    return f"[Dir: {p} | error: {e}]"
+            if _is_binary_file(p):
+                return _handle_binary_file(p)
+            # Text file
+            try:
+                size = p.stat().st_size
+                if size > 500 * 1024:
+                    return f"[File: {p} | {size} bytes terlalu besar, gunakan tool 'read' dengan offset/limit atau grep]"
+                text = p.read_text(encoding="utf-8", errors="ignore")
+                if len(text) > 8000:
+                    return f"[File: {p} | {size} bytes, {len(text)} chars - truncated preview 8000 chars]\n{text[:8000]}\n...[truncated {len(text)-8000} chars]..."
+                return f"[File: {p} | {size} bytes]\n{text}"
+            except Exception as e:
+                return f"[File: {p} | error baca: {e}]"
+        except Exception as e:
+            return f"[File: {raw} | error: {e}]"
+    # Ganti semua @mentions
+    expanded = re.sub(pattern, repl, user_input)
+    if expanded != user_input:
+        print(f"[embed] @file terdeteksi dan di-embed", file=sys.stderr)
+    return expanded
 
 def parse_args():
     p = argparse.ArgumentParser(description="AI Agent sederhana - tool calling + filesystem + LLM")
@@ -373,9 +480,13 @@ def main():
     print("", file=sys.stderr)
 
     if args.once:
+        # Expand @file sebelum kirim ke loop
+        expanded_once = expand_at_mentions(args.once)
         print(f"> {args.once}", file=sys.stderr)
+        if expanded_once != args.once:
+            print(f"[expanded] {expanded_once[:500]}...", file=sys.stderr)
         try:
-            answer = loop.run(args.once, stream=stream)
+            answer = loop.run(expanded_once, stream=stream)
         except KeyboardInterrupt:
             print("\n[interrupted]", file=sys.stderr)
             sys.exit(0)
@@ -485,6 +596,7 @@ Commands:
   /think [variant]       lihat/pilih thinking: none/low/medium/high/xhigh (None jika model tidak support)
   /tool-call [mode]      izin tool: accept-all, accept-fs, ask
   /info                  tampilkan model, token, panjang chat
+  @nama_file             embed file ke prompt (text/pdf/foto), cth: @README.md @\"foto.jpg\" @doc.pdf
   !<command>             jalankan shell langsung (Ctrl-C untuk terminate)
   /clear                 bersihkan context (reset)
   /session               tampilkan session id
@@ -503,9 +615,13 @@ Commands:
             continue
         # fallback /models lama etc sudah di-handle di atas
 
+        # Expand @file sebelum kirim (embed file + handle binary)
+        expanded = expand_at_mentions(user_input)
+        if expanded != user_input:
+            print(f"[embed] file di-embed ke prompt ({len(expanded)} chars)", file=sys.stderr)
         # Kirim ke agent loop
         try:
-            loop.run(user_input, stream=stream)
+            loop.run(expanded, stream=stream)
         except KeyboardInterrupt:
             print("\n[loop interrupted]", file=sys.stderr)
             continue
