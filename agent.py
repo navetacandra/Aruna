@@ -14,7 +14,7 @@ Commands REPL:
   /usage(s)                lihat penggunaan token
   /skill(s) [name]         lihat daftar skill / load skill
   /reload                  reload state tanpa kehilangan konteks
-  /think [variant]         lihat/pilih thinking variant (none/low/medium/high)
+  /think [variant]         lihat/pilih thinking variant (none/low/medium/high/xhigh)
   /tool-call [mode]        izin tool: accept-all, accept-fs, ask
   !<command>               jalankan shell langsung (terminatable via Ctrl-C)
   /help, /clear, /session, /exit
@@ -38,7 +38,7 @@ from agent_core.prompts import build_system_prompt
 from agent_core.skills import build_skills_catalog, list_skills as skl_list, load_skill
 from agent_core.permissions import PermissionManager
 
-THINK_VARIANTS = ["none", "low", "medium", "high"]  # none = non-thinking
+THINK_VARIANTS = ["none", "low", "medium", "high", "xhigh"]  # none = non-thinking, xhigh = extra high
 DEFAULT_THINK = "none"
 
 def parse_args():
@@ -52,7 +52,7 @@ def parse_args():
     p.add_argument("--max-iterations", type=int, default=None, help="Override max loop iterations")
     p.add_argument("--base-url", default=None, help="Override OpenCode base URL")
     p.add_argument("--tool-call", default="ask", choices=["accept-all", "accept-fs", "ask"], help="Mode izin tool (default ask)")
-    p.add_argument("--think", default=None, help="Thinking variant: none/low/medium/high")
+    p.add_argument("--think", default=None, help="Thinking variant: none/low/medium/high/xhigh")
     return p.parse_args()
 
 def run_shell_direct(command: str, workdir: str = "."):
@@ -212,8 +212,9 @@ def handle_think(arg: str, llm: LLMClient, loop: AgentLoop, current_variant: str
             print(f"    - low    : reasoning cepat, hemat token")
             print(f"    - medium : seimbang")
             print(f"    - high   : mendalam, lambat & mahal")
+            print(f"    - xhigh  : ekstra mendalam, paling lambat & mahal")
             print(f"  current: {current_variant}", file=sys.stderr)
-            print(f"  cara pakai: /think medium  atau  /think high", file=sys.stderr)
+            print(f"  cara pakai: /think medium  atau  /think xhigh", file=sys.stderr)
         return current_variant
     # set variant
     if arg not in THINK_VARIANTS:
@@ -437,7 +438,7 @@ Commands:
   /usage                 lihat penggunaan token (alias /usages, /tokens)
   /skill [name]          lihat daftar skill / load skill (alias /skills)
   /reload                reload state tanpa kehilangan konteks
-  /think [variant]       lihat/pilih thinking: none/low/medium/high (None jika model tidak support)
+  /think [variant]       lihat/pilih thinking: none/low/medium/high/xhigh (None jika model tidak support)
   /tool-call [mode]      izin tool: accept-all, accept-fs, ask
   !<command>             jalankan shell langsung (Ctrl-C untuk terminate)
   /clear                 bersihkan context (reset)

@@ -93,7 +93,7 @@ OPENCODE_BASE_URL=https://opencode.ai AGENT_MAX_TOKENS=50000 python agent.py
 | `/usage` / `/usages` / `/tokens` | Lihat `ctx.token_usage()` (tokens, max, %, compactions, msgs) |
 | `/skill [name]` / `/skills` | `skill_list` semua atau `skill_load` detail `SKILL.md` |
 | `/reload` | Reload state tanpa kehilangan konteks (rebuild catalog, system prompt, keep messages) |
-| `/think [none/low/medium/high]` | Lihat/pilih thinking variant; tampil `None` jika model tidak support `is_responses_model()` |
+| `/think [none/low/medium/high/xhigh]` | Lihat/pilih thinking variant; tampil `None` jika model tidak support `is_responses_model()` |
 | `/tool-call [accept-all/accept-fs/ask]` | Izin hardware: `ask` semua konfirmasi, `accept-fs` fs auto, `accept-all` semua auto |
 | `!echo hi` | Shell langsung `subprocess.Popen` terminatable via Ctrl-C |
 | `/help` `/clear` `/session` `/exit` | Bantuan, reset context, tampil session, keluar |

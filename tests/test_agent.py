@@ -411,8 +411,11 @@ class TestCommands(unittest.TestCase):
         v3 = handle_think("medium", llm, loop, "none")
         self.assertEqual(v3, "medium")
         self.assertEqual(loop.extra_body.get("reasoning_effort"), "medium")
-        v4 = handle_think("none", llm, loop, v3)
-        self.assertEqual(v4, "none")
+        v4 = handle_think("xhigh", llm, loop, v3)
+        self.assertEqual(v4, "xhigh")
+        self.assertEqual(loop.extra_body.get("reasoning_effort"), "xhigh")
+        v5 = handle_think("none", llm, loop, v4)
+        self.assertEqual(v5, "none")
         self.assertNotIn("reasoning_effort", loop.extra_body)
 
     def test_tool_call(self):
