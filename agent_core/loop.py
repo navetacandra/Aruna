@@ -30,11 +30,53 @@ class AgentLoop:
         self.session_id = session_id
         self.max_iterations = max_iterations
         self.verbose = verbose
-        self.tool_defs = get_tool_definitions()
+        self._all_tool_defs = {t["function"]["name"]: t for t in get_tool_definitions()}
+        # Lazy: hanya load tool yang diperlukan, awalnya kosong, akan diisi per iterasi berdasarkan kebutuhan
+        self.tool_defs: List[Dict[str, Any]] = []
         self.permission_manager = permission_manager
         self.extra_body = extra_body or {}
         self._tool_cache: Dict[str, str] = {}
         self._tool_history: List[str] = []  # list of "fname:args_json" for dedup
+        self._loaded_tools: set = set()
+
+    def _select_tools_for_input(self, user_input: str) -> List[Dict[str, Any]]:
+        """Pilih hanya tool yang diperlukan berdasarkan prompt user (lazy loading)."""
+        text = user_input.lower()
+        needed = set()
+        # Selalu sediakan skill discovery sebagai lazy entry point
+        # Tapi jangan load semua skill content, hanya via tool
+        # Heuristik berdasarkan kata kunci
+        if any(k in text for k in ["baca", "read", "lihat", "tampilkan", "file", "cat", "ls"]):
+            needed.update(["read", "glob"])
+        if any(k in text for k in ["tulis", "buat", "write", "simpan", "edit", "ubah", "ganti"]):
+            needed.update(["write", "edit", "read"])
+        if any(k in text for k in ["cari", "search", "grep", "temukan"]):
+            needed.update(["grep", "glob"])
+        if any(k in text for k in ["jalan", "exec", "bash", "command", "shell", "run", "eksekusi", "pwd", "ls", "python", "pip", "npm"]):
+            needed.update(["bash"])
+        if any(k in text for k in ["skill", "kemampuan", "lakukan"]):
+            needed.update(["skill_list", "skill_load"])
+        # Jika tidak ada yang match, berikan minimal discovery tools + read/bash sebagai fallback
+        if not needed:
+            needed.update(["read", "bash", "skill_list"])
+        # Selalu sertakan skill discovery jika belum ada
+        if "skill_list" not in needed and "skill" in text:
+            needed.add("skill_list")
+        # Buat list defs yang hanya diperlukan
+        defs = [self._all_tool_defs[n] for n in needed if n in self._all_tool_defs]
+        # Track loaded
+        for n in needed:
+            self._loaded_tools.add(n)
+        return defs
+
+    def _ensure_tool_loaded(self, fname: str):
+        """Jika LLM minta tool yang belum di-load, load on-demand untuk iter berikutnya."""
+        if fname not in self._loaded_tools and fname in self._all_tool_defs:
+            self._loaded_tools.add(fname)
+            # Tambahkan ke tool_defs untuk iter berikutnya
+            if self._all_tool_defs[fname] not in self.tool_defs:
+                self.tool_defs.append(self._all_tool_defs[fname])
+                self._log(f"[lazy] tool '{fname}' dimuat on-demand")
 
     def _log(self, s: str):
         if self.verbose:
@@ -44,6 +86,9 @@ class AgentLoop:
         """Satu turn: user_input -> loop hingga selesai -> return final answer."""
         self.context.add_user(user_input)
         save_message(self.session_id, {"role": "user", "content": user_input})
+        # Lazy load: hanya tool yang diperlukan untuk prompt ini
+        self.tool_defs = self._select_tools_for_input(user_input)
+        self._log(f"[tools] loaded {len(self.tool_defs)}: {', '.join(t['function']['name'] for t in self.tool_defs)} (lazy)")
         # helper untuk ambil think saat ini
         def _current_think():
             return self.extra_body.get("reasoning_effort") if self.extra_body else "none"
@@ -141,6 +186,20 @@ class AgentLoop:
                     sys.stdout.flush()
 
             if not tool_calls:
+                # Cek apakah LLM sebutkan tool yang belum di-load tapi dibutuhkan (lazy fallback) - hanya dari content, bukan dari input
+                lower_content = content.lower() if content else ""
+                needs_tool = False
+                for tname in self._all_tool_defs:
+                    if tname not in [t["function"]["name"] for t in self.tool_defs] and tname in lower_content:
+                        # LLM sebutkan tool yang belum di-load, load on-demand untuk iter berikutnya
+                        self._ensure_tool_loaded(tname)
+                        needs_tool = True
+                if needs_tool and iteration < self.max_iterations:
+                    # Inject reminder untuk pakai tool yang baru di-load
+                    self._log(f"[lazy] tool tambahan dimuat, minta LLM coba lagi")
+                    self.context.messages.append({"role": "user", "content": f"[SYSTEM] Tool yang kamu butuhkan sekarang tersedia: {', '.join([t['function']['name'] for t in self.tool_defs])}. Gunakan tool tersebut untuk menyelesaikan tugas, jangan hanya menjawab teks."})
+                    save_message(self.session_id, {"role": "user", "content": f"[SYSTEM] Tool tersedia: {', '.join([t['function']['name'] for t in self.tool_defs])}"})
+                    continue
                 # Selesai - tidak ada tool
                 # Jika stream=False, print content sekarang
                 if not stream and content:

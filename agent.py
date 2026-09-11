@@ -189,24 +189,19 @@ def handle_skill(arg: str):
     print(load_skill(arg), file=sys.stderr)
 
 def handle_reload(ctx: ContextManager, llm, permission_manager, think_variant):
-    """Reload state tanpa kehilangan konteks: rebuild catalog, system prompt, keep messages."""
+    """Reload state tanpa kehilangan konteks: rebuild prompt lazy, keep messages."""
     print("[reload] reloading state...", file=sys.stderr)
-    catalog = build_skills_catalog()
+    # Lazy: jangan load semua skills, hanya note
+    catalog = ""  # lazy
     new_prompt = build_system_prompt(catalog)
-    # keep current messages selain system, ganti system
-    old_messages = ctx.messages[1:] if len(ctx.messages) > 1 else []
     ctx.system_prompt = new_prompt
     ctx.messages[0] = {"role": "system", "content": new_prompt}
-    # tidak hilangkan history messages, cuma update system
-    # estimasi ulang token
     u = ctx.token_usage()
-    print(f"[reload] system prompt updated ({len(new_prompt)} chars)", file=sys.stderr)
-    print(f"  skills: {catalog.count(chr(10))+1 if catalog else 0} skill(s)", file=sys.stderr)
+    print(f"[reload] system prompt updated ({len(new_prompt)} chars) (lazy, skills via skill_list)", file=sys.stderr)
     print(f"  model: {llm.model} ({'supports thinking' if is_responses_model(llm.model) else 'no thinking'})", file=sys.stderr)
     print(f"  think: {think_variant}", file=sys.stderr)
     print(f"  permission: {permission_manager.status()}", file=sys.stderr)
     print(f"  tokens: {u['tokens']}/{u['max']} ({u['percent']}%) msgs={len(ctx.messages)}", file=sys.stderr)
-    # juga re-set extra_body jika thinking berubah? tidak perlu, sudah di loop
     print("[reload] done - konteks percakapan tetap dipertahankan", file=sys.stderr)
 
 def handle_think(arg: str, llm: LLMClient, loop: AgentLoop, current_variant: str):
@@ -309,8 +304,9 @@ def main():
         if not session_id.startswith("ses_"):
             session_id = f"ses_{session_id}"
 
-    # Build context
-    catalog = build_skills_catalog()
+    # Build context - lazy skill/tool loading: jangan load semua skill di awal
+    # Hanya beri tahu LLM bahwa skills tersedia via skill_list/skill_load, tidak inject katalog penuh
+    catalog = ""  # lazy, tidak load di awal
     system_prompt = build_system_prompt(catalog)
 
     ctx = ContextManager(system_prompt=system_prompt)
