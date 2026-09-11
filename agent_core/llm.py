@@ -1,16 +1,29 @@
-"""LLM client untuk OpenCode API - tanpa external deps, streaming SSE, tool calling.
-Mengacu pada opencode.js: zen/v1/chat/completions & zen/v1/responses
+"""LLM client untuk multi-provider fallback - tanpa external deps, streaming SSE, tool calling.
+Mendukung OpenAI Chat/Responses dan Anthropic Messages dengan konversi otomatis.
+History disimpan tetap format OpenAI, request dikonversi sesuai provider.
+State provider per model disimpan di .agent/llm_provider_state.json dan akan rubah jika fallback terjadi.
+Mengacu pada opencode.js: zen/v1/chat/completions & zen/v1/responses + Anthropic v1/messages
 """
 import json
 import re
 import uuid
 import urllib.request
 import urllib.error
+import sys
 from typing import Any, Callable, Dict, List, Optional
 
-from .config import OPENCODE_BASE_URL, OPENCODE_UA, RESPONSES_MODELS
+from .config import OPENCODE_BASE_URL, OPENCODE_UA
+from .providers import (
+    build_candidate_providers,
+    get_headers_for_provider,
+    prepare_payload_for_provider,
+    parse_nonstream_response,
+    update_provider_state,
+    base_model_id,
+    is_responses_model,
+)
 
-# --- Helpers port dari opencode.js ---
+# --- Helpers port dari opencode.js (tetap diekspor untuk kompatibilitas) ---
 
 def generate_request_id() -> str:
     return f"msg_{uuid.uuid4().hex}"
@@ -18,12 +31,8 @@ def generate_request_id() -> str:
 def generate_session_id() -> str:
     return f"ses_{uuid.uuid4().hex}"
 
-def base_model_id(model: str) -> str:
-    return re.sub(r"\([^()]+\)\s*$", "", str(model or "")).strip()
-
-def is_responses_model(model: str) -> bool:
-    base = base_model_id(model)
-    return base in RESPONSES_MODELS or "muse-spark" in base
+# re-ekspor untuk import lama
+__all__ = ["LLMClient", "fetch_models", "generate_request_id", "generate_session_id", "base_model_id", "is_responses_model"]
 
 def fetch_models(base_url: str = OPENCODE_BASE_URL) -> List[Dict[str, Any]]:
     url = f"{base_url}/zen/v1/models"
@@ -46,46 +55,21 @@ class LLMClient:
         self.base_url = base_url.rstrip("/")
         self.session_id = session_id or generate_session_id()
 
+    # Backward compat: _prepare_body tetap ada tapi delegasi ke providers
     def _prepare_body(self, messages: List[Dict[str, Any]], tools: Optional[List[Dict]] = None,
                       extra_body: Optional[Dict[str, Any]] = None, stream: bool = True) -> Dict[str, Any]:
-        body: Dict[str, Any] = {
-            "model": self.model,
-            "messages": messages,
-            "stream": stream,
-        }
-        if tools:
-            body["tools"] = tools
-            body["tool_choice"] = "auto"
-        if extra_body:
-            body.update(extra_body)
-
-        # Transformasi untuk Responses models (port dari opencode.js:68-79)
-        if is_responses_model(self.model):
-            if "max_output_tokens" not in body:
-                if "max_completion_tokens" in body:
-                    body["max_output_tokens"] = body["max_completion_tokens"]
-                elif "max_tokens" in body:
-                    body["max_output_tokens"] = body["max_tokens"]
-            body.pop("max_tokens", None)
-            body.pop("max_completion_tokens", None)
-            if "reasoning_effort" in body:
-                body["reasoning"] = {
-                    "effort": str(body.pop("reasoning_effort")).lower().strip(),
-                    "summary": "auto"
-                }
-        return body
+        # Untuk kompatibilitas, gunakan opencode_chat logic
+        from .providers import prepare_payload_for_provider, ProviderSpec
+        # tebak provider dari model
+        is_resp = is_responses_model(self.model)
+        sdk = "openai_responses" if is_resp else "openai_chat"
+        dummy = ProviderSpec("compat", self.base_url, "/zen/v1/chat/completions" if sdk=="openai_chat" else "/zen/v1/responses", sdk)
+        return prepare_payload_for_provider(dummy, self.model, messages, tools, extra_body, stream)
 
     def _headers(self) -> Dict[str, str]:
-        return {
-            "Content-Type": "application/json",
-            "Authorization": "Bearer public",
-            "User-Agent": OPENCODE_UA,
-            "x-opencode-client": "desktop",
-            "x-opencode-session": self.session_id,
-            "x-opencode-request": generate_request_id(),
-            "x-opencode-project": "global",
-            "Accept": "text/event-stream",
-        }
+        # Untuk kompatibilitas, return opencode headers
+        from .providers import _opencode_headers
+        return _opencode_headers(self.session_id)
 
     def chat(self,
              messages: List[Dict[str, Any]],
@@ -95,43 +79,74 @@ class LLMClient:
              on_delta: Optional[Callable[[str], None]] = None,
              on_tool_delta: Optional[Callable[[str], None]] = None,
              timeout: int = 120) -> Dict[str, Any]:
-        """Kirim chat, dukung streaming + tool calling.
-        Returns dict: {content: str, tool_calls: list|None, raw_finish_reason: str}
-        Jika stream=True, on_delta dipanggil per token text.
+        """Kirim chat dengan fallback multi-provider.
+        History tetap OpenAI format, payload otomatis dikonversi per provider.
+        State format/url per model disimpan dan akan rubah jika fallback terjadi.
+        Returns dict: {content: str, tool_calls: list|None, finish_reason: str}
         """
-        body = self._prepare_body(messages, tools, extra_body, stream=stream)
-        is_resp = is_responses_model(self.model)
-        endpoint = "/zen/v1/responses" if is_resp else "/zen/v1/chat/completions"
-        url = self.base_url + endpoint
+        candidates = build_candidate_providers(self.model, self.base_url)
+        last_exc: Optional[Exception] = None
 
+        for provider in candidates:
+            try:
+                result = self._chat_with_provider(provider, messages, tools, extra_body, stream, on_delta, on_tool_delta, timeout)
+                # simpan state sukses untuk model yang sama (akan dipakai lagi)
+                try:
+                    update_provider_state(self.model, provider.sdk, provider.endpoint, provider.base_url)
+                    print(f"[provider] using {provider.sdk} {provider.url} for {self.model}", file=sys.stderr)
+                except:
+                    pass
+                return result
+            except urllib.error.HTTPError as e:
+                body_txt = ""
+                try:
+                    if e.fp:
+                        body_txt = e.read().decode("utf-8", errors="ignore")
+                except:
+                    pass
+                msg = f"HTTP {e.code}: {body_txt[:500]}"
+                # Semua HTTP error coba fallback ke provider lain (termasuk 401 auth jika ada fallback)
+                _wrapped = RuntimeError(f"Provider {provider.name} {provider.url} failed {msg}")
+                _wrapped.__cause__ = e
+                last_exc = _wrapped
+                # Jika ini provider terakhir, akan raise di luar loop
+                print(f"[provider fallback] {provider.name} {provider.url} gagal {e.code}, coba fallback...", file=sys.stderr)
+                continue
+            except Exception as e:
+                last_exc = e
+                print(f"[provider fallback] {provider.name} {provider.url} error: {e}, coba fallback...", file=sys.stderr)
+                continue
+
+        # semua gagal
+        if last_exc:
+            raise RuntimeError(f"All providers failed for {self.model}: {last_exc}") from last_exc
+        raise RuntimeError("All providers failed")
+
+    def _chat_with_provider(self, provider, messages, tools, extra_body, stream, on_delta, on_tool_delta, timeout):
+        body = prepare_payload_for_provider(provider, self.model, messages, tools, extra_body, stream)
+        headers = get_headers_for_provider(provider, self.session_id)
         data = json.dumps(body).encode("utf-8")
-        req = urllib.request.Request(url, data=data, headers=self._headers(), method="POST")
+        req = urllib.request.Request(provider.url, data=data, headers=headers, method="POST")
 
-        # Non-stream: satu request biasa
+        # Non-stream
         if not stream:
             try:
                 with urllib.request.urlopen(req, timeout=timeout) as resp:
                     j = json.loads(resp.read().decode("utf-8"))
-                    # Normalisasi ke format OpenAI chat
-                    if is_resp:
-                        # responses API non-stream: coba extract text
-                        # format: {output: [{content:[{text:"..."}]}]} atau choices
-                        text = _extract_responses_text(j)
-                        if text is not None:
-                            return {"content": text, "tool_calls": None, "finish_reason": "stop"}
-                    msg = j.get("choices", [{}])[0].get("message", {})
-                    return {
-                        "content": msg.get("content") or "",
-                        "tool_calls": msg.get("tool_calls"),
-                        "finish_reason": j.get("choices", [{}])[0].get("finish_reason", "stop")
-                    }
-            except urllib.error.HTTPError as e:
-                body_txt = e.read().decode("utf-8", errors="ignore") if e.fp else ""
-                raise RuntimeError(f"OpenCode API error {e.code}: {body_txt}") from e
+                    return parse_nonstream_response(provider, j)
+            except urllib.error.HTTPError:
+                raise
+            except Exception as e:
+                raise RuntimeError(f"Non-stream error: {e}") from e
 
-        # Streaming SSE
+        # Streaming
+        if provider.sdk == "anthropic":
+            return self._stream_anthropic(req, timeout, on_delta, on_tool_delta)
+        else:
+            return self._stream_openai(provider, req, timeout, on_delta, on_tool_delta)
+
+    def _stream_openai(self, provider, req, timeout, on_delta, on_tool_delta):
         content_parts: List[str] = []
-        # tool_calls accumulator: {index: {id, name, arguments}}
         tool_accum: Dict[int, Dict[str, str]] = {}
         finish_reason: Optional[str] = None
 
@@ -144,11 +159,14 @@ class LLMClient:
                         break
                     buffer += chunk.decode("utf-8", errors="ignore")
                     lines = buffer.split("\n")
-                    buffer = lines.pop()  # sisa incomplete
+                    buffer = lines.pop()
 
                     for line in lines:
                         trimmed = line.strip()
-                        if not trimmed or not trimmed.startswith("data:"):
+                        # Anthropic kadang kirim event: line, tapi untuk openai hanya data:
+                        if not trimmed or trimmed.startswith("event:"):
+                            continue
+                        if not trimmed.startswith("data:"):
                             continue
                         data_str = trimmed[len("data:"):].strip()
                         if data_str == "[DONE]":
@@ -158,10 +176,7 @@ class LLMClient:
                         except json.JSONDecodeError:
                             continue
 
-                        # --- Coba parse format responses API ---
-                        # responses delta: {"type":"response.output_text.delta","delta":"..."}
-                        # atau {"type":"response.function_call_arguments.delta", ...}
-                        # Kita fallback ke choices delta jika tidak cocok
+                        # Responses API delta
                         handled = False
                         ptype = parsed.get("type", "")
                         if isinstance(ptype, str) and ptype.startswith("response."):
@@ -173,7 +188,6 @@ class LLMClient:
                                         on_delta(d)
                                 handled = True
                             elif "function_call" in ptype or "tool" in ptype.lower():
-                                # tidak ada spec pasti, lewati
                                 pass
                             if ptype in ("response.completed", "response.done"):
                                 finish_reason = "stop"
@@ -181,12 +195,8 @@ class LLMClient:
                             if handled:
                                 continue
 
-                        # --- Format OpenAI chat.completions delta ---
                         choices = parsed.get("choices")
                         if not choices:
-                            # beberapa responses juga bungkus di output
-                            # coba _extract_responses_text delta?
-                            # fallback: jika ada 'delta' top-level
                             if "delta" in parsed and isinstance(parsed["delta"], str):
                                 content_parts.append(parsed["delta"])
                                 if on_delta:
@@ -194,19 +204,14 @@ class LLMClient:
                             continue
 
                         choice = choices[0] if choices else {}
-                        # finish_reason
                         if choice.get("finish_reason"):
                             finish_reason = choice["finish_reason"]
-
                         delta = choice.get("delta", {}) or {}
-                        # content
                         if delta.get("content"):
                             c = delta["content"]
                             content_parts.append(c)
                             if on_delta:
                                 on_delta(c)
-
-                        # tool_calls delta (streaming)
                         tcs = delta.get("tool_calls")
                         if tcs:
                             for tc in tcs:
@@ -224,10 +229,8 @@ class LLMClient:
                                         tool_accum[idx]["arguments"] += arg_delta
                                         if on_tool_delta:
                                             on_tool_delta(arg_delta)
-                        # juga handle message.tool_calls non-stream chunk (kadang tanpa delta)
                         msg_tc = choice.get("message", {}).get("tool_calls") if "message" in choice else None
                         if msg_tc:
-                            # non-stream batch
                             for i, tc in enumerate(msg_tc):
                                 tool_accum[i] = {
                                     "id": tc.get("id", f"call_{i}"),
@@ -237,13 +240,11 @@ class LLMClient:
 
                     if finish_reason == "stop" and data_str == "[DONE]":
                         break
-                # handle leftover buffer line yang belum diproses (tanpa \n)
                 if buffer.strip().startswith("data:"):
                     data_str = buffer.strip()[len("data:"):].strip()
                     if data_str and data_str != "[DONE]":
                         try:
                             parsed = json.loads(data_str)
-                            # sama seperti di atas, coba extract content
                             choices = parsed.get("choices", [])
                             if choices:
                                 delta = choices[0].get("delta", {}) or {}
@@ -254,46 +255,186 @@ class LLMClient:
                         except:
                             pass
 
-        except urllib.error.HTTPError as e:
-            body_txt = e.read().decode("utf-8", errors="ignore") if e.fp else ""
-            raise RuntimeError(f"OpenCode API error {e.code}: {body_txt}") from e
+        except urllib.error.HTTPError:
+            raise
         except Exception as e:
-            # Jika streaming gagal mid-way, kembalikan apa yang sudah terkumpul
             if content_parts or tool_accum:
                 pass
             else:
                 raise
 
-        # Build tool_calls result
-        tool_calls: Optional[List[Dict[str, Any]]] = None
+        tool_calls = None
         if tool_accum:
             tool_calls = []
             for idx in sorted(tool_accum.keys()):
                 acc = tool_accum[idx]
-                # skip empty
                 if not acc["name"] and not acc["arguments"]:
                     continue
-                # validasi arguments JSON, jika gagal biarkan string mentah
                 args = acc["arguments"] or "{}"
                 tool_calls.append({
                     "id": acc["id"] or f"call_{idx}_{uuid.uuid4().hex[:8]}",
                     "type": "function",
-                    "function": {
-                        "name": acc["name"],
-                        "arguments": args
-                    }
+                    "function": {"name": acc["name"], "arguments": args}
                 })
 
-        return {
-            "content": "".join(content_parts),
-            "tool_calls": tool_calls,
-            "finish_reason": finish_reason or ("tool_calls" if tool_calls else "stop")
-        }
+        return {"content": "".join(content_parts), "tool_calls": tool_calls, "finish_reason": finish_reason or ("tool_calls" if tool_calls else "stop")}
+
+    def _stream_anthropic(self, req, timeout, on_delta, on_tool_delta):
+        """Streaming khusus Anthropic SSE (event: + data:) dinormalisasi ke OpenAI."""
+        content_parts: List[str] = []
+        # anthropic tool_use: index -> {id, name, input_json}
+        tool_accum: Dict[int, Dict[str, Any]] = {}
+        # mapping content_block index -> type
+        block_types: Dict[int, str] = {}
+        # untuk tool delta, simpan partial_json
+        finish_reason = None
+        current_event = None
+
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                buffer = ""
+                while True:
+                    chunk = resp.read(4096)
+                    if not chunk:
+                        break
+                    buffer += chunk.decode("utf-8", errors="ignore")
+                    lines = buffer.split("\n")
+                    buffer = lines.pop()
+
+                    for line in lines:
+                        trimmed = line.strip()
+                        if not trimmed:
+                            continue
+                        if trimmed.startswith("event:"):
+                            current_event = trimmed[len("event:"):].strip()
+                            continue
+                        if not trimmed.startswith("data:"):
+                            continue
+                        data_str = trimmed[len("data:"):].strip()
+                        if data_str == "[DONE]":
+                            break
+                        try:
+                            parsed = json.loads(data_str)
+                        except:
+                            continue
+
+                        ptype = parsed.get("type", "")
+
+                        # Anthropic events
+                        if ptype == "content_block_start":
+                            idx = parsed.get("index", 0)
+                            block = parsed.get("content_block", {})
+                            btype = block.get("type", "")
+                            block_types[idx] = btype
+                            if btype == "tool_use":
+                                # init tool
+                                tool_accum[idx] = {"id": block.get("id",""), "name": block.get("name",""), "input_json": ""}
+                        elif ptype == "content_block_delta":
+                            idx = parsed.get("index", 0)
+                            delta = parsed.get("delta", {})
+                            dtype = delta.get("type", "")
+                            btype = block_types.get(idx, "")
+                            if dtype == "text_delta" or (btype == "text" and "text" in delta):
+                                txt = delta.get("text", "")
+                                if txt:
+                                    content_parts.append(txt)
+                                    if on_delta:
+                                        on_delta(txt)
+                            elif dtype == "input_json_delta":
+                                pj = delta.get("partial_json", "")
+                                if idx in tool_accum:
+                                    tool_accum[idx]["input_json"] += pj
+                                    if on_tool_delta:
+                                        on_tool_delta(pj)
+                                else:
+                                    # fallback: jika belum ada, buat entry
+                                    if idx not in tool_accum:
+                                        tool_accum[idx] = {"id": f"toolu_{idx}", "name": "", "input_json": pj}
+                                    else:
+                                        tool_accum[idx]["input_json"] += pj
+                        elif ptype == "content_block_stop":
+                            pass
+                        elif ptype == "message_delta":
+                            delta = parsed.get("delta", {})
+                            if delta.get("stop_reason"):
+                                sr = delta["stop_reason"]
+                                if sr == "tool_use":
+                                    finish_reason = "tool_calls"
+                                elif sr in ("end_turn", "stop"):
+                                    finish_reason = "stop"
+                                else:
+                                    finish_reason = sr
+                        elif ptype == "message_start":
+                            pass
+                        elif ptype == "message_stop":
+                            finish_reason = finish_reason or "stop"
+                            break
+                        else:
+                            # Fallback: jika ada text delta langsung
+                            if "delta" in parsed and isinstance(parsed["delta"], dict) and "text" in parsed["delta"]:
+                                txt = parsed["delta"]["text"]
+                                content_parts.append(txt)
+                                if on_delta:
+                                    on_delta(txt)
+
+                    # anthropic biasanya tidak pakai [DONE], tapi event message_stop
+                    if finish_reason and current_event == "message_stop":
+                        break
+
+                # handle leftover
+                if buffer.strip().startswith("data:"):
+                    try:
+                        data_str = buffer.strip()[len("data:"):].strip()
+                        if data_str and data_str != "[DONE]":
+                            parsed = json.loads(data_str)
+                            # cek text
+                            if parsed.get("type") == "content_block_delta":
+                                delta = parsed.get("delta", {})
+                                if delta.get("text"):
+                                    content_parts.append(delta["text"])
+                                    if on_delta:
+                                        on_delta(delta["text"])
+                    except:
+                        pass
+
+        except urllib.error.HTTPError:
+            raise
+        except Exception as e:
+            if content_parts or tool_accum:
+                pass
+            else:
+                raise
+
+        # build tool_calls
+        tool_calls = None
+        if tool_accum:
+            tool_calls = []
+            for idx in sorted(tool_accum.keys()):
+                acc = tool_accum[idx]
+                # skip jika bukan tool_use (text blocks tidak di tool_accum)
+                if not acc.get("name"):
+                    continue
+                # input_json mungkin tidak lengkap? coba parse
+                raw = acc.get("input_json", "{}")
+                if not raw.strip():
+                    raw = "{}"
+                # validasi JSON, jika gagal biarkan raw
+                try:
+                    json.loads(raw)
+                    args = raw
+                except:
+                    args = raw  # biarkan, nanti execute_tool akan error jika invalid
+                tool_calls.append({
+                    "id": acc.get("id") or f"call_{idx}_{uuid.uuid4().hex[:8]}",
+                    "type": "function",
+                    "function": {"name": acc["name"], "arguments": args}
+                })
+
+        return {"content": "".join(content_parts), "tool_calls": tool_calls, "finish_reason": finish_reason or ("tool_calls" if tool_calls else "stop")}
 
 
 def _extract_responses_text(j: Dict[str, Any]) -> Optional[str]:
     try:
-        # coba beberapa path
         if "output" in j:
             out = j["output"]
             if isinstance(out, list):

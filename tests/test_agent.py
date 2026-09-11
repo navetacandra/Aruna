@@ -446,5 +446,303 @@ class TestCommands(unittest.TestCase):
         self.assertEqual(ctx.messages[1]["content"], "hi")
 
 
+class TestProviders(unittest.TestCase):
+    def test_openai_messages_to_anthropic(self):
+        from agent_core.providers import openai_messages_to_anthropic
+        msgs = [
+            {"role": "system", "content": "You are helpful"},
+            {"role": "user", "content": "hello"},
+            {"role": "assistant", "content": "hi", "tool_calls": [{"id": "call_1", "type": "function", "function": {"name": "read", "arguments": '{"filePath":"a.txt"}'}}]},
+            {"role": "tool", "tool_call_id": "call_1", "name": "read", "content": "file content"},
+        ]
+        system, anth_msgs = openai_messages_to_anthropic(msgs)
+        self.assertEqual(system, "You are helpful")
+        self.assertEqual(anth_msgs[0]["role"], "user")
+        self.assertEqual(anth_msgs[0]["content"], "hello")
+        # assistant should have tool_use block
+        self.assertEqual(anth_msgs[1]["role"], "assistant")
+        self.assertTrue(isinstance(anth_msgs[1]["content"], list))
+        self.assertEqual(anth_msgs[1]["content"][1]["type"], "tool_use")
+        self.assertEqual(anth_msgs[1]["content"][1]["name"], "read")
+        # tool result should be user with tool_result
+        self.assertEqual(anth_msgs[2]["role"], "user")
+        self.assertEqual(anth_msgs[2]["content"][0]["type"], "tool_result")
+        self.assertEqual(anth_msgs[2]["content"][0]["tool_use_id"], "call_1")
+
+    def test_openai_tools_to_anthropic(self):
+        from agent_core.providers import openai_tools_to_anthropic, anthropic_tools_to_openai
+        tools = [{"type":"function","function":{"name":"read","description":"read file","parameters":{"type":"object","properties":{"filePath":{"type":"string"}}}}}]
+        anth = openai_tools_to_anthropic(tools)
+        self.assertEqual(anth[0]["name"], "read")
+        self.assertIn("input_schema", anth[0])
+        back = anthropic_tools_to_openai(anth)
+        self.assertEqual(back[0]["function"]["name"], "read")
+
+    def test_anthropic_response_to_openai(self):
+        from agent_core.providers import anthropic_response_to_openai
+        content = [{"type":"text","text":"hello "}, {"type":"tool_use","id":"toolu_1","name":"bash","input":{"command":"ls"}}]
+        res = anthropic_response_to_openai(content, "tool_use")
+        self.assertEqual(res["content"], "hello ")
+        self.assertEqual(res["tool_calls"][0]["function"]["name"], "bash")
+        self.assertEqual(res["finish_reason"], "tool_calls")
+
+    def test_prepare_payload_anthropic(self):
+        from agent_core.providers import prepare_payload_for_provider, ProviderSpec
+        p = ProviderSpec("anthropic", "https://api.anthropic.com", "/v1/messages", "anthropic")
+        msgs = [{"role":"system","content":"sys"},{"role":"user","content":"hi"}]
+        body = prepare_payload_for_provider(p, "claude-3", msgs, None, None, False)
+        self.assertIn("system", body)
+        self.assertEqual(body["system"], "sys")
+        self.assertEqual(body["messages"][0]["role"], "user")
+
+    def test_prepare_payload_openai(self):
+        from agent_core.providers import prepare_payload_for_provider, ProviderSpec
+        p = ProviderSpec("openai_chat", "https://api.openai.com", "/v1/chat/completions", "openai_chat")
+        msgs = [{"role":"user","content":"hi"}]
+        tools = [{"type":"function","function":{"name":"read","description":"read","parameters":{"type":"object","properties":{}}}}]
+        body = prepare_payload_for_provider(p, "gpt-4", msgs, tools, {"temperature":0.5}, True)
+        self.assertEqual(body["model"], "gpt-4")
+        self.assertIn("tools", body)
+        self.assertEqual(body["temperature"], 0.5)
+
+    def test_candidate_providers(self):
+        from agent_core.providers import build_candidate_providers
+        # muse-spark should prioritize responses
+        cands = build_candidate_providers("muse-spark-1.2-contributor-free")
+        self.assertEqual(cands[0].sdk, "openai_responses")
+        # claude should prioritize anthropic
+        cands2 = build_candidate_providers("claude-sonnet-4")
+        self.assertEqual(cands2[0].sdk, "anthropic")
+        # gpt should prioritize openai_chat via opencode
+        cands3 = build_candidate_providers("mimo-v2.5-free")
+        self.assertEqual(cands3[0].sdk, "openai_chat")
+        self.assertIn("/zen/v1/chat/completions", cands3[0].endpoint)
+
+    def test_provider_state_persistence(self):
+        from agent_core.providers import update_provider_state, get_saved_provider, load_provider_state
+        import tempfile, pathlib, json, os
+        import agent_core.providers as prov_mod
+        orig = prov_mod.PROVIDER_STATE_FILE
+        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".json")
+        tmp.close()
+        prov_mod.PROVIDER_STATE_FILE = tmp.name
+        try:
+            update_provider_state("test-model-xyz", "anthropic", "/v1/messages", "https://api.anthropic.com")
+            saved = get_saved_provider("test-model-xyz")
+            self.assertEqual(saved["provider"], "anthropic")
+            self.assertEqual(saved["endpoint"], "/v1/messages")
+            # base_model_id fallback
+            saved2 = get_saved_provider("test-model-xyz (free)")
+            self.assertEqual(saved2["provider"], "anthropic")
+            state = load_provider_state()
+            self.assertIn("test-model-xyz", state)
+        finally:
+            prov_mod.PROVIDER_STATE_FILE = orig
+            try:
+                os.unlink(tmp.name)
+            except: pass
+
+    def test_llm_fallback_chain(self):
+        from agent_core.llm import LLMClient
+        from agent_core.providers import ProviderSpec
+        import urllib.error, json, io
+        # Mock urlopen to fail first provider (opencode_chat) then succeed second (openai_chat)
+        orig_urlopen = urllib.request.urlopen
+        call_count = {"n":0}
+        def fake_urlopen(req, timeout=120):
+            call_count["n"] += 1
+            url = req.full_url if hasattr(req, 'full_url') else str(req)
+            # first call fail with 404
+            if call_count["n"] == 1:
+                raise urllib.error.HTTPError(url, 404, "Not Found", {}, io.BytesIO(b'{"error":"not found"}'))
+            # second succeed with openai chat format
+            fake_resp = io.BytesIO(json.dumps({"choices":[{"message":{"content":"fallback success","tool_calls":None},"finish_reason":"stop"}]}).encode())
+            # mock context manager
+            class FakeResp:
+                def __enter__(self): return self
+                def __exit__(self, *a): return False
+                def read(self, *a, **kw): return fake_resp.read(*a, **kw) if hasattr(fake_resp, 'read') else b''
+            # simpler: return BytesIO with json, but urlopen expects .read()
+            # We'll return a mock that has read and __enter__
+            mock = FakeResp()
+            mock.read = lambda *a, **kw: json.dumps({"choices":[{"message":{"content":"fallback success","tool_calls":None},"finish_reason":"stop"}]}).encode()
+            mock.__enter__ = lambda s: s
+            mock.__exit__ = lambda s,*a: False
+            # need to make it work with with statement in llm.py: with urllib.request.urlopen(...) as resp: resp.read()
+            # So return mock
+            return mock
+        import agent_core.providers as prov_mod
+        orig_state = prov_mod.PROVIDER_STATE_FILE
+        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".json")
+        tmp.close()
+        prov_mod.PROVIDER_STATE_FILE = tmp.name
+        urllib.request.urlopen = fake_urlopen
+        try:
+            client = LLMClient(model="mimo-v2.5-free", base_url="https://opencode.ai")
+            res = client.chat([{"role":"user","content":"hi"}], stream=False)
+            self.assertEqual(res["content"], "fallback success")
+            self.assertGreaterEqual(call_count["n"], 2)
+            # state should be saved to second provider (openai_chat)
+            saved = prov_mod.get_saved_provider("mimo-v2.5-free")
+            self.assertIsNotNone(saved)
+            self.assertEqual(saved["provider"], "openai_chat")
+        finally:
+            urllib.request.urlopen = orig_urlopen
+            prov_mod.PROVIDER_STATE_FILE = orig_state
+            try:
+                os.unlink(tmp.name)
+            except: pass
+            # also cleanup state file that may have been created in default location?
+            import pathlib as pl
+            p = pl.Path(".agent/llm_provider_state.json")
+            if p.exists() and p.stat().st_size < 2000:
+                # keep minimal
+                pass
+
+    def test_history_stays_openai_format(self):
+        from agent_core.history import generate_session_id, save_message, load_messages
+        import agent_core.history as hist_mod
+        import tempfile, pathlib
+        tmp = tempfile.TemporaryDirectory()
+        orig = hist_mod.HISTS_DIR
+        hist_mod.HISTS_DIR = tmp.name
+        try:
+            sid = generate_session_id()
+            # simpan OpenAI format
+            save_message(sid, {"role":"user","content":"hello"})
+            save_message(sid, {"role":"assistant","content":"hi","tool_calls":[{"id":"c1","type":"function","function":{"name":"read","arguments":"{}"}}]})
+            save_message(sid, {"role":"tool","tool_call_id":"c1","name":"read","content":"data"})
+            msgs = load_messages(sid)
+            self.assertEqual(msgs[0]["role"], "user")
+            self.assertEqual(msgs[1]["tool_calls"][0]["function"]["name"], "read")
+            self.assertEqual(msgs[2]["role"], "tool")
+            # Konversi saat request anthropic harus tidak merubah history
+            from agent_core.providers import openai_messages_to_anthropic
+            system, anth = openai_messages_to_anthropic(msgs)
+            # history tetap OpenAI
+            self.assertEqual(msgs[0]["content"], "hello")
+            # anthropic hasil berbeda
+            self.assertTrue(any(m["role"]=="user" for m in anth))
+        finally:
+            hist_mod.HISTS_DIR = orig
+            tmp.cleanup()
+
+    def test_anthropic_streaming_parse(self):
+        from agent_core.llm import LLMClient
+        import urllib.request, urllib.error, json, io
+        # Buat fake anthropic SSE streaming: text + tool_use
+        chunks = [
+            b'event: message_start\ndata: {"type":"message_start","message":{"id":"msg_1"}}\n\n',
+            b'event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}\n\n',
+            b'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hello"}}\n\n',
+            b'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" world"}}\n\n',
+            b'event: content_block_start\ndata: {"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_123","name":"read","input":{}}}\n\n',
+            b'event: content_block_delta\ndata: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\\"filePath\\" : \\"a.txt\\"}"}}\n\n',
+            b'event: content_block_stop\ndata: {"type":"content_block_stop","index":1}\n\n',
+            b'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"tool_use"}}\n\n',
+            b'event: message_stop\ndata: {"type":"message_stop"}\n\n',
+        ]
+        data = b"".join(chunks)
+        orig_urlopen = urllib.request.urlopen
+        idx = {"i":0}
+        class FakeResp:
+            def __enter__(self): return self
+            def __exit__(self,*a): return False
+            def read(self, n=4096):
+                if idx["i"] >= len(data):
+                    return b""
+                chunk = data[idx["i"]: idx["i"]+n]
+                idx["i"] += len(chunk)
+                return chunk
+        def fake_urlopen(req, timeout=120):
+            # Pastikan ini adalah anthropic provider
+            self.assertIn("anthropic", req.full_url if hasattr(req, 'full_url') else "")
+            return FakeResp()
+        # patch
+        self.orig_url = orig_urlopen
+        import agent_core.providers as prov_mod
+        orig_state = prov_mod.PROVIDER_STATE_FILE
+        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".json")
+        tmp.close()
+        prov_mod.PROVIDER_STATE_FILE = tmp.name
+        urllib.request.urlopen = fake_urlopen
+        try:
+            # Buat client dengan model anthropic, paksa hanya satu candidate anthropic agar tidak fallback
+            client = LLMClient(model="claude-sonnet-4")
+            # Monkey patch build_candidate_providers untuk hanya return anthropic
+            orig_build = prov_mod.build_candidate_providers
+            def only_anthropic(m,b=None):
+                return [prov_mod.ProviderSpec("anthropic","https://api.anthropic.com","/v1/messages","anthropic")]
+            prov_mod.build_candidate_providers = only_anthropic
+            # juga patch di llm module
+            import agent_core.llm as llm_mod
+            orig_build_llm = llm_mod.build_candidate_providers
+            llm_mod.build_candidate_providers = only_anthropic
+            res = client.chat([{"role":"user","content":"hi"}], stream=True)
+            self.assertEqual(res["content"], "Hello world")
+            self.assertIsNotNone(res["tool_calls"])
+            self.assertEqual(res["tool_calls"][0]["function"]["name"], "read")
+            self.assertEqual(res["finish_reason"], "tool_calls")
+        finally:
+            urllib.request.urlopen = orig_urlopen
+            prov_mod.build_candidate_providers = orig_build
+            llm_mod.build_candidate_providers = orig_build_llm
+            prov_mod.PROVIDER_STATE_FILE = orig_state
+            try: os.unlink(tmp.name)
+            except: pass
+
+    def test_openai_streaming_parse(self):
+        from agent_core.llm import LLMClient
+        import urllib.request, json, io
+        chunks = [
+            b'data: {"choices":[{"delta":{"content":"Hello "},"finish_reason":null}]}\n\n',
+            b'data: {"choices":[{"delta":{"content":"world"},"finish_reason":null}]}\n\n',
+            b'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"read","arguments":"{\\"file"}}]},"finish_reason":null}]}\n\n',
+            b'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"Path\\":\\"a.txt\\"}"}}]},"finish_reason":null}]}\n\n',
+            b'data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}\n\n',
+            b'data: [DONE]\n\n',
+        ]
+        data = b"".join(chunks)
+        orig_urlopen = urllib.request.urlopen
+        idx = {"i":0}
+        class FakeResp:
+            def __enter__(self): return self
+            def __exit__(self,*a): return False
+            def read(self, n=4096):
+                if idx["i"] >= len(data):
+                    return b""
+                chunk = data[idx["i"]: idx["i"]+n]
+                idx["i"] += len(chunk)
+                return chunk
+        def fake_urlopen(req, timeout=120):
+            return FakeResp()
+        import agent_core.providers as prov_mod
+        orig_state = prov_mod.PROVIDER_STATE_FILE
+        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".json")
+        tmp.close()
+        prov_mod.PROVIDER_STATE_FILE = tmp.name
+        urllib.request.urlopen = fake_urlopen
+        try:
+            client = LLMClient(model="mimo-v2.5-free")
+            orig_build = prov_mod.build_candidate_providers
+            def only_openai(m,b=None):
+                return [prov_mod.ProviderSpec("opencode_chat","https://opencode.ai","/zen/v1/chat/completions","openai_chat")]
+            prov_mod.build_candidate_providers = only_openai
+            import agent_core.llm as llm_mod
+            orig_build_llm = llm_mod.build_candidate_providers
+            llm_mod.build_candidate_providers = only_openai
+            res = client.chat([{"role":"user","content":"hi"}], stream=True)
+            self.assertEqual(res["content"], "Hello world")
+            self.assertIsNotNone(res["tool_calls"])
+            self.assertEqual(res["tool_calls"][0]["function"]["name"], "read")
+        finally:
+            urllib.request.urlopen = orig_urlopen
+            prov_mod.build_candidate_providers = orig_build
+            llm_mod.build_candidate_providers = orig_build_llm
+            prov_mod.PROVIDER_STATE_FILE = orig_state
+            try: os.unlink(tmp.name)
+            except: pass
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

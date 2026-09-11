@@ -1,11 +1,12 @@
 # AI Agent Sederhana - Tanpa TUI
 
-Agent Python minimal tanpa external dependencies yang fokus pada **tool calling, filesystem, LLM API, Agent Loop & Context Manager**. Mengacu pada `opencode.js` sebagai provider tunggal (`https://opencode.ai`).
+Agent Python minimal tanpa external dependencies yang fokus pada **tool calling, filesystem, LLM API, Agent Loop & Context Manager**. Mengacu pada `opencode.js` sebagai provider utama (`https://opencode.ai`) dengan **fallback multi-SDK** (OpenAI `v1/chat/completions`, `v1/responses`, Anthropic `v1/messages`) dan state per-model.
 
 ## Fitur Utama
 
 - **Tanpa TUI merepotkan**: REPL sederhana `input()` - input user selalu di bawah, output streaming ke stdout, log ke stderr.
 - **LLM API**: Port dari `opencode.js` - dukung `zen/v1/chat/completions` & `zen/v1/responses`, deteksi `muse-spark`, SSE streaming, akumulasi `tool_calls` delta, header `x-opencode-*`.
+- **Fallback Multi-SDK**: `agent_core/providers.py:1` - fallback otomatis `openai_chat` ↔ `openai_responses` ↔ `anthropic_messages` dengan konversi payload/tool. Simpan state per-model di `.agent/llm_provider_state.json` (rubah saat fallback, pakai lagi jika model sama). History tetap format OpenAI, konversi hanya saat request Anthropic (`openai_messages_to_anthropic()`).
 - **Tool Calling Kuat**: 8 tools OpenAI-compatible:
   - `read` - baca file / list dir dengan `offset/limit`, truncate line >2000
   - `write` - tulis file (mkdir -p otomatis)
@@ -32,19 +33,21 @@ Agent Python minimal tanpa external dependencies yang fokus pada **tool calling,
 ```
 agent.py                 # CLI entry (interactive + --once, 8+ commands, permission, thinking)
 agent_core/
-  llm.py                 # LLM client + SSE + is_responses_model
+  llm.py                 # LLM client + fallback chain + SSE
+  providers.py           # Provider abstraction & conversion OpenAI↔Anthropic + state .agent/llm_provider_state.json
   tools.py               # 8 tool schemas & impl
   context.py             # ContextManager
   loop.py                # AgentLoop + permission gate + extra_body
   permissions.py         # PermissionManager (ask/accept-fs/accept-all)
   skills.py              # discover/load .agent/skills
-  history.py             # JSONL session
-  config.py              # MAX_TOKENS, DEFAULT_MODEL, dll
+  history.py             # JSONL session (tetap OpenAI format)
+  config.py              # MAX_TOKENS, DEFAULT_MODEL, PROVIDER URL, dll
   prompts.py             # BASE_SYSTEM_PROMPT
 .agent/
   skills/example/SKILL.md
   hists/<session_id>.jsonl
-tests/test_agent.py      # 31 tests (mock LLM, permissions, commands)
+  llm_provider_state.json # state per-model: {model:{provider,endpoint,base_url}}
+tests/test_agent.py      # 42 tests (mock LLM, permissions, commands, providers fallback)
 opencode.js              # acuan provider (asli)
 ```
 
@@ -55,7 +58,7 @@ Tanpa external deps, Python 3.10+ cukup:
 ```bash
 git clone <repo>
 cd agent
-python -m unittest tests.test_agent -v  # 31 passed
+python -m unittest tests.test_agent -v  # 42 passed
 ```
 
 ## Penggunaan
@@ -135,18 +138,32 @@ Statistik: `ctx.token_usage()` -> `{tokens, max, percent, compactions}`. Lihat `
 3. History JSONL tiap turn.
 
 Header LLM: `Authorization: Bearer public`, `User-Agent: opencode`, `x-opencode-session`, `x-opencode-request` (uuid), `x-opencode-project: global` - mirror `opencode.js:85`.
+Fallback header: `Authorization: Bearer <OPENAI_API_KEY>` untuk OpenAI, `x-api-key` + `anthropic-version: 2023-06-01` untuk Anthropic (`OPENAI_BASE_URL`/`ANTHROPIC_BASE_URL` via env).
+
+## Provider Fallback Detail
+
+`agent_core/providers.py:320` `build_candidate_providers(model)` tentukan urutan berdasarkan model:
+- `muse-spark` → `opencode_responses` → `openai_responses` → `opencode_chat` → `anthropic`
+- `claude` → `anthropic` → `opencode_chat` → `openai_chat`
+- lain → `opencode_chat` → `openai_chat` → `opencode_responses` → `anthropic`
+Saved state di `.agent/llm_provider_state.json` dipakai pertama jika model sama; jika request 404/401/422/400 → fallback ke berikutnya dan `update_provider_state()` simpan yang sukses. History tetap OpenAI (`history.py:60` `save_message` tidak diubah), konversi hanya di `prepare_payload_for_provider()` untuk Anthropic (`system` pisah, `tool_calls`→`tool_use`, `tool`→`tool_result`, `tools` parameter→`input_schema`).
+
+SSE parsing: OpenAI (`data: {"choices":[{"delta":...}]}`) vs Anthropic (`event: content_block_delta` + `data: {"delta":{"text":...}}` / `input_json_delta`).
+
+Env: `OPENCODE_BASE_URL`, `OPENAI_BASE_URL`, `ANTHROPIC_BASE_URL`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`.
 
 ## Pengujian
 
 ```bash
 python -m unittest tests.test_agent -v
-# 31 tests: LLM helpers, Context compact, Tools, Skills, History, Loop mock, Permissions, Commands (/compact/model/usage/skill/think/tool-call/shell/reload)
+# 42 tests: LLM helpers, Context compact, Tools, Skills, History, Loop mock, Permissions, Commands, Providers (conversion openai↔anthropic, fallback chain, state, history format, streaming)
 
 # E2E real LLM (butuh network)
-python agent.py --once "Baca agent.py dan ringkas" --tool-call accept-fs --model mimo-v2.5-free
+python agent.py --once "Baca agent.py dan ringkas" --tool-call accept-fs --model mimo-v2.5-free  # fallback opencode_chat → openai_chat jika perlu
 echo -e "baca demo.txt\ny\ny" | python agent.py --tool-call ask  # test permission prompt
 !echo hi  # di REPL jalankan shell terminatable
 python -c "from agent_core.llm import fetch_models; print(fetch_models()[:3])"
+cat .agent/llm_provider_state.json  # lihat state per-model
 ```
 
 ## Tanpa External Deps

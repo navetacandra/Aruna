@@ -26,6 +26,11 @@ STREAM = True
 # Paths
 SKILLS_DIR = ".agent/skills"
 HISTS_DIR = ".agent/hists"
+PROVIDER_STATE_FILE = ".agent/llm_provider_state.json"
 
 # Safety: max file read bytes
 MAX_READ_BYTES = 1024 * 500  # 500KB per read
+
+# Fallback provider URLs (dipakai jika SDK berbeda)
+OPENAI_BASE_URL = os.environ.get("OPENAI_BASE_URL", "https://api.openai.com")
+ANTHROPIC_BASE_URL = os.environ.get("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
