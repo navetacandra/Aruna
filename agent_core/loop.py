@@ -201,9 +201,16 @@ class AgentLoop:
                     save_message(self.session_id, {"role": "user", "content": f"[SYSTEM] Tool tersedia: {', '.join([t['function']['name'] for t in self.tool_defs])}"})
                     continue
                 # Selesai - tidak ada tool
-                # Jika stream=False, print content sekarang
+                # Jika stream=False, print content sekarang (handle UTF-8 di Windows)
                 if not stream and content:
-                    print(content)
+                    try:
+                        print(content)
+                    except UnicodeEncodeError:
+                        try:
+                            sys.stdout.reconfigure(encoding='utf-8')
+                            print(content)
+                        except:
+                            print(content.encode('utf-8', errors='ignore').decode('utf-8', errors='ignore'))
                 self.context.add_assistant(content)
                 save_message(self.session_id, {"role": "assistant", "content": content, "model": self.llm.model, "think_variant": _current_think()})
                 final_answer = content
