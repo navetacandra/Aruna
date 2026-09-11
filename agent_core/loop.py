@@ -168,7 +168,7 @@ class AgentLoop:
                     if fname in ("read", "write", "edit"):
                         # fs: "<<< {type} {filepath}"
                         fp = parsed.get("filePath") or parsed.get("filepath") or ""
-                        self._log(f"<<< {fname} {fp}".strip())
+                        self._log(f"<<< preparing {fname}")
                     elif fname == "bash":
                         # bash/command: "<<< exec {command}"
                         cmd = parsed.get("command", "")
@@ -200,8 +200,13 @@ class AgentLoop:
                     tid = tc.get("id", f"call_{iteration}")
                     fname = tc["function"]["name"]
                     fargs = tc["function"]["arguments"]
+
                     # Tampilkan preparing sebelum eksekusi
-                    self._log(f">>>>> preparing {fname}")
+                    if fname in ("read", "write", "edit"):
+                        parsed = json.loads(fargs) if isinstance(fargs, str) else fargs
+                        fp = parsed.get("filePath") or parsed.get("filepath") or ""
+                        self._log(f"<<< {fname} {fp}".strip())
+
                     # Deduplikasi: cek apakah tool yang sama dengan args sama sudah dipanggil baru-baru ini
                     try:
                         parsed_args = json.loads(fargs) if isinstance(fargs, str) else fargs
