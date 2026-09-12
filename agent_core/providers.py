@@ -104,6 +104,23 @@ def openai_messages_to_anthropic(messages: List[Dict[str, Any]]) -> Tuple[Option
                 system_parts.append(str(content))
             continue
         if role == "user":
+            # If previous message is a tool_result user, append this user text to it to avoid consecutive user messages
+            if anthropic_msgs and anthropic_msgs[-1].get("role") == "user":
+                last = anthropic_msgs[-1]
+                last_content = last.get("content")
+                # Check if last is a tool_result user (contains tool_result)
+                is_tool_result = isinstance(last_content, list) and any(b.get("type") == "tool_result" for b in last_content)
+                if is_tool_result:
+                    # Append this user text as additional content to the same user message
+                    if isinstance(content, str):
+                        last["content"].append({"type": "text", "text": content})
+                    elif isinstance(content, list):
+                        last["content"].extend(content if isinstance(content, list) else [{"type": "text", "text": str(content)}])
+                    elif content is None:
+                        last["content"].append({"type": "text", "text": ""})
+                    else:
+                        last["content"].append({"type": "text", "text": str(content)})
+                    continue
             if isinstance(content, str):
                 anthropic_msgs.append({"role": "user", "content": content})
             elif isinstance(content, list):
@@ -271,57 +288,40 @@ def openai_messages_to_responses(messages: List[Dict[str, Any]]) -> Tuple[Option
                     # empty assistant without tools, still skip? but we insert empty to preserve turn
                     inputs.append({"role": "assistant", "content": [{"type": "output_text", "text": ""}]})
             else:
-                # Preserve tool_calls as function_call blocks for Responses history
+                # For Responses, keep it simple: just output_text, tool result will be separate user message
+                # Sending function_call in history causes 400 for some providers (e.g., muse-spark)
                 text = content if isinstance(content, str) else ""
                 blocks: List[Dict[str, Any]] = []
                 if text.strip():
                     blocks.append({"type": "output_text", "text": text})
-                for tc in tool_calls:
-                    fn = tc.get("function", {})
-                    name = fn.get("name", "")
-                    args_raw = fn.get("arguments", "{}")
-                    # Ensure args is a string JSON
-                    if isinstance(args_raw, dict):
-                        args_raw = json.dumps(args_raw, ensure_ascii=False)
-                    blocks.append({
-                        "type": "function_call",
-                        "call_id": tc.get("id") or f"call_{uuid.uuid4().hex[:8]}",
-                        "name": name,
-                        "arguments": args_raw if isinstance(args_raw, str) else json.dumps(args_raw, ensure_ascii=False)
-                    })
-                inputs.append({"role": "assistant", "content": blocks if blocks else [{"type": "output_text", "text": ""}]})
+                # Don't include function_call blocks in history for now to avoid 400
+                # The tool result will be sent as user input_text in next turn
+                inputs.append({"role": "assistant", "content": blocks if blocks else [{"type": "output_text", "text": text if text.strip() else ""}]})
                 continue
         if role == "tool":
-            # Tool result -> function_call_output for Responses (preserves call_id correlation)
+            # Tool result -> user input_text (simple, works for Responses)
             text = str(content)
-            tool_call_id = m.get("tool_call_id") or m.get("id") or "unknown"
             has_image = bool(VISION_IMAGE_RE.search(text))
             has_file = bool(INPUT_FILE_RE.search(text))
             if has_image or has_file:
                 clean_img, imgs = _extract_vision_images(text) if has_image else (text, [])
                 clean, files = _extract_input_files(clean_img) if has_file else (clean_img, [])
-                # For binary tool results, use function_call_output with attached files as well
-                # First, the text output
+                # For binary tool results, send as user input_text + image/file
                 if clean.strip():
                     inputs.append({"role": "user", "content": [{"type": "input_text", "text": f"Tool result ({m.get('name','')}): {clean}"}]})
-                    # Then files as separate inputs if any
                     for mime, b64 in imgs:
                         inputs.append({"role": "user", "content": [{"type": "input_image", "image_url": f"data:{mime};base64,{b64}", "detail": "auto"}]})
                     for fpath, mime, b64 in files:
                         fname = pathlib.Path(fpath).name if fpath else "file"
                         inputs.append({"role": "user", "content": [{"type": "input_file", "filename": fname, "file_data": f"data:{mime};base64,{b64}"}]})
                 else:
-                    # Only files
                     for mime, b64 in imgs:
                         inputs.append({"role": "user", "content": [{"type": "input_image", "image_url": f"data:{mime};base64,{b64}", "detail": "auto"}]})
                     for fpath, mime, b64 in files:
                         fname = pathlib.Path(fpath).name if fpath else "file"
                         inputs.append({"role": "user", "content": [{"type": "input_file", "filename": fname, "file_data": f"data:{mime};base64,{b64}"}]})
-                # Also add the function_call_output for correlation (required by Responses)
-                inputs.append({"role": "assistant", "content": [{"type": "function_call_output", "call_id": tool_call_id, "output": clean[:2000]}]})
             else:
-                # Standard tool result as function_call_output
-                inputs.append({"role": "assistant", "content": [{"type": "function_call_output", "call_id": tool_call_id, "output": text[:5000]}]})
+                inputs.append({"role": "user", "content": [{"type": "input_text", "text": f"Tool result ({m.get('name','')}): {text}"}]})
             continue
         # fallback
         inputs.append({"role": "user", "content": [{"type": "input_text", "text": str(content)}]})
