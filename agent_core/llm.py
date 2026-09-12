@@ -117,9 +117,10 @@ class LLMClient:
                         # 429 is not a format error, don't fallback yet, retry same provider
                         if attempt < 5:
                             wait = 5 + (attempt - 1) * 3  # 5, 8, 11, 14
-                            # Format per instructions: "{error_message} {n} Retry on {x} seconds.."
-                            err_msg = body_txt.strip()[:200] if body_txt.strip() else msg
-                            print(f"{err_msg} {attempt} Retry on {wait} seconds..", file=sys.stderr)
+                            # Only log first retry to reduce noise, and final fallback
+                            if attempt == 1:
+                                err_msg = body_txt.strip()[:200] if body_txt.strip() else msg
+                                print(f"{err_msg} {attempt} Retry on {wait} seconds.. (will retry up to 5 times)", file=sys.stderr)
                             try:
                                 time.sleep(wait)
                             except KeyboardInterrupt:
@@ -136,7 +137,9 @@ class LLMClient:
                     _wrapped = RuntimeError(f"Provider {provider.name} {provider.url} failed {msg}")
                     _wrapped.__cause__ = e
                     last_exc = _wrapped
-                    print(f"[provider fallback] {provider.name} {provider.url} failed {e.code}, trying fallback...", file=sys.stderr)
+                    # Only log fallback once per provider to reduce noise
+                    if attempt == 1:
+                        print(f"[provider fallback] {provider.name} {provider.url} failed {e.code}, trying fallback...", file=sys.stderr)
                     break  # break inner retry, continue to next provider
                 except Exception as e:
                     # If binary file and not a Response -> reject directly without fallback

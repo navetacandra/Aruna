@@ -396,10 +396,10 @@ def handle_max_iter(arg: str, loop: AgentLoop, session_id: str = ""):
             print(f"[max-iter] invalid value: {arg}. Must be 1-100", file=sys.stderr)
             return
         loop.max_iterations = n
-        # persist for session
+        # persist for session as metadata (not as conversation message)
         if session_id:
             try:
-                save_message(session_id, {"role": "system", "content": f"[max-iter set to {n}]", "max_iterations": n})
+                save_message(session_id, {"type": "config", "max_iterations": n, "content": f"[max-iter set to {n}]"})
             except Exception as e:
                 print(f"[max-iter] failed to save: {e}", file=sys.stderr)
         print(f"[max-iter] set to {n} (saved for session {session_id})", file=sys.stderr)

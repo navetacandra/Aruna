@@ -23,10 +23,12 @@ SUMMARY_TRIGGER_TOKENS = 80000
 MAX_ITERATIONS = int(os.environ.get("AGENT_MAX_ITERATIONS", "30"))
 STREAM = True
 
-# Paths
-SKILLS_DIR = ".agent/skills"
-HISTS_DIR = ".agent/hists"
-PROVIDER_STATE_FILE = ".agent/llm_provider_state.json"
+# Paths - absolute based on project root (where this file lives is agent_core/, so parent is project root)
+import pathlib as _pathlib
+_PROJECT_ROOT = _pathlib.Path(__file__).parent.parent
+SKILLS_DIR = str(_PROJECT_ROOT / ".agent" / "skills")
+HISTS_DIR = str(_PROJECT_ROOT / ".agent" / "hists")
+PROVIDER_STATE_FILE = str(_PROJECT_ROOT / ".agent" / "llm_provider_state.json")
 
 # Safety: max file read bytes
 MAX_READ_BYTES = 1024 * 500  # 500KB per read
