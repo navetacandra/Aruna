@@ -70,17 +70,14 @@ class AgentLoop:
             label = task_info.get("label", "subagent")
             task_prompt = task_info.get("task", "")
             sub_session_id = f"{self.session_id}-sub-{_uuid.uuid4().hex[:8]}"
-            # Sub-agent gets a fresh context but shares system prompt
-            sub_ctx = ContextManager(system_prompt=self.context.system_prompt, max_tokens=self.context.max_tokens, keep_recent=self.context.keep_recent)
-            # Load recent history snippet for context (last 2 messages) to give sub-agent some background without full history
-            # Keep it minimal to avoid token bloat
+            # Sub-agent gets a fresh context with explicit instruction not to spawn further
+            sub_system_prompt = self.context.system_prompt + "\n\n[SUB-AGENT MODE] You are a sub-agent. Do NOT use spawn_agents. Complete your single task directly using read, bash, glob, grep, etc. Be concise."
+            sub_ctx = ContextManager(system_prompt=sub_system_prompt, max_tokens=self.context.max_tokens, keep_recent=self.context.keep_recent)
+            # Sub-agent gets minimal context - only the task, not parent's spawn history
+            # Don't load parent's recent messages that contain spawn_agents calls
             try:
-                recent = self.context.messages[-2:] if len(self.context.messages) > 2 else []
-                for m in recent:
-                    if m.get("role") == "user":
-                        sub_ctx.add_user(m.get("content", "")[:2000])
-                    elif m.get("role") == "assistant":
-                        sub_ctx.add_assistant(m.get("content", "")[:2000])
+                # Only add a brief context note, not the full parent history
+                sub_ctx.add_user(f"[Parent context] Main task was: {self.context.messages[0].get('content','')[:500] if self.context.messages else ''}")
             except:
                 pass
             # Sub-agent uses same LLM model but with reduced max_iterations and no spawn_agents to avoid recursion
@@ -346,13 +343,27 @@ class AgentLoop:
                         try:
                             parsed = json.loads(fargs) if isinstance(fargs, str) else fargs
                             tasks = parsed.get("tasks", []) if isinstance(parsed, dict) else []
+                            # Handle case where tasks is a JSON string (LLM sometimes sends string instead of array)
+                            if isinstance(tasks, str):
+                                try:
+                                    tasks = json.loads(tasks)
+                                except:
+                                    # If it's a single task string, wrap it
+                                    tasks = [{"task": tasks}]
                             # Normalize tasks - handle both string and object formats
                             normalized = []
                             for t in tasks:
                                 if isinstance(t, str):
+                                    # Skip empty or single-char tasks (malformed)
+                                    if len(t.strip()) < 3:
+                                        continue
                                     normalized.append({"task": t, "label": f"agent-{len(normalized)+1}"})
                                 elif isinstance(t, dict) and "task" in t:
-                                    normalized.append({"task": t["task"], "label": t.get("label", f"agent-{len(normalized)+1}")})
+                                    # Validate task is not just a single char
+                                    task_str = t["task"]
+                                    if isinstance(task_str, str) and len(task_str.strip()) < 3:
+                                        continue
+                                    normalized.append({"task": task_str, "label": t.get("label", f"agent-{len(normalized)+1}")})
                             if not normalized:
                                 output = "Error: spawn_agents requires 'tasks' array with at least one {task: string}"
                                 self.context.add_tool_result(tid, fname, output)
