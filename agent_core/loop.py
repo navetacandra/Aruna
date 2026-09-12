@@ -85,6 +85,14 @@ class AgentLoop:
                 pass
             # Sub-agent uses same LLM model but with reduced max_iterations and no spawn_agents to avoid recursion
             sub_max_iter = max(5, min(12, self.max_iterations // 2 + 3))
+            # Clone permission manager for sub-agent to avoid race
+            sub_pm = None
+            if self.permission_manager is not None:
+                from .permissions import PermissionManager as _PM
+                try:
+                    sub_pm = _PM(mode=self.permission_manager.mode)
+                except:
+                    sub_pm = self.permission_manager
             # Filter out spawn_agents from sub-agent tools to prevent infinite recursion
             sub_loop = AgentLoop(
                 llm=self.llm,
@@ -92,7 +100,7 @@ class AgentLoop:
                 session_id=sub_session_id,
                 max_iterations=sub_max_iter,
                 verbose=False,  # quiet sub-agents, parent will log summary
-                permission_manager=self.permission_manager,
+                permission_manager=sub_pm,
                 extra_body=dict(self.extra_body) if self.extra_body else {}
             )
             # Remove spawn_agents from sub-agent's available tools

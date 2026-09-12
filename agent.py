@@ -98,7 +98,8 @@ def _handle_binary_file(path: pathlib.Path) -> str:
     if mime.startswith("image/") or ext in (".zip",".bin",".exe",".docx",".xlsx"):
         return f"{header}\n[[INPUT_FILE:{abs_path}]]\n[Binary - only supported via Response]"
     try:
-        data = path.read_bytes()[:3000]
+        with open(path, "rb") as f:
+            data = f.read(3000)
         b64 = base64.b64encode(data).decode("ascii")
         preview = b64[:500] + ("..." if len(data) == 3000 else "")
         return f"{header}\n[Binary preview base64 (first 3000 bytes): {preview}]"
@@ -463,6 +464,10 @@ def main():
         msgs = load_messages(session_id)
         if msgs:
             filtered = [m for m in msgs if m.get("role") != "system"]
+            # Cap history to avoid blowing context on resume (keep last 80)
+            if len(filtered) > 80:
+                print(f"[history] capping {len(filtered)} messages to last 80 for resume", file=sys.stderr)
+                filtered = filtered[-80:]
             if filtered:
                 ctx.load(filtered)
                 print(f"[loaded {len(filtered)} messages from history]", file=sys.stderr)

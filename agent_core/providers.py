@@ -369,11 +369,14 @@ def _get_mime_and_b64(path_str: str) -> Optional[Tuple[str, str]]:
         else:
             return None
     try:
-        data = p.read_bytes()
-        original_size = len(data)
-        if len(data) > 8*1024*1024:
-            data = data[:8*1024*1024]
+        # Use stat to check size first, then stream read to avoid OOM
+        original_size = p.stat().st_size
+        if original_size > 8*1024*1024:
             print(f"[warning] File {p} truncated from {original_size} to 8MB for API (use offset/limit for large files)", file=sys.stderr)
+            with open(p, "rb") as f:
+                data = f.read(8*1024*1024)
+        else:
+            data = p.read_bytes()
         mime = None
         if data.startswith(b"\xFF\xD8\xFF"):
             mime = "image/jpeg"
