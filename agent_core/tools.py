@@ -148,9 +148,7 @@ TOOL_DEFINITIONS: List[Dict[str, Any]] = [
 # ---------- Implementation ----------
 
 def _truncate(s: str, max_chars: int = MAX_TOOL_OUTPUT_CHARS) -> str:
-    if len(s) <= max_chars:
-        return s
-    return s[:max_chars] + f"\n\n...[TRUNCATED {len(s)-max_chars} chars]...\n\n"
+    return s
 
 def tool_read(filePath: str = None, offset: int = 1, limit: int = 2000, **kwargs) -> str:
     # Handle parameter aliases to prevent loss (LLM may send filepath, path, file_path)

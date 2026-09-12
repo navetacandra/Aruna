@@ -60,8 +60,6 @@ class ContextManager:
         self.messages.append(msg)
 
     def add_tool_result(self, tool_call_id: str, name: str, content: str):
-        if len(content) > MAX_TOOL_OUTPUT_CHARS:
-            content = content[:MAX_TOOL_OUTPUT_CHARS] + f"\n...[TRUNCATED {len(content)-MAX_TOOL_OUTPUT_CHARS} chars]...\n"
         self.messages.append({
             "role": "tool",
             "tool_call_id": tool_call_id,

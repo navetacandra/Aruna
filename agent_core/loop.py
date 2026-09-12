@@ -309,23 +309,15 @@ class AgentLoop:
                         allowed = self.permission_manager.check_or_prompt(fname, prompt_args)
                         if not allowed:
                             output = f"[DENIED] User denied execution of tool '{fname}' with args {prompt_args}. Inform the user that permission was denied and offer alternatives."
-                            from agent_core.config import MAX_TOOL_OUTPUT_CHARS
-                            if len(output) > MAX_TOOL_OUTPUT_CHARS:
-                                output = output[:MAX_TOOL_OUTPUT_CHARS] + f"\n...[TRUNCATED {len(output)-MAX_TOOL_OUTPUT_CHARS} chars]...\n"
                             self.context.add_tool_result(tid, fname, output)
                             save_message(self.session_id, {"role": "tool", "tool_call_id": tid, "name": fname, "content": output})
                             continue
                     output = execute_tool(fname, fargs)
-                    # Show bash output directly (truncated preview)
+                    # Show bash output directly
                     if fname == "bash":
-                        preview = output[:3000] + ("...[truncated]" if len(output) > 3000 else "")
-                        self._log(f"[bash output]\n{preview}")
-                    from agent_core.config import MAX_TOOL_OUTPUT_CHARS
-                    to_store = output
-                    if len(output) > MAX_TOOL_OUTPUT_CHARS:
-                        to_store = output[:MAX_TOOL_OUTPUT_CHARS] + f"\n...[TRUNCATED {len(output)-MAX_TOOL_OUTPUT_CHARS} chars]...\n"
-                    self.context.add_tool_result(tid, fname, to_store)
-                    save_message(self.session_id, {"role": "tool", "tool_call_id": tid, "name": fname, "content": to_store})
+                        self._log(f"[bash output]\n{output}")
+                    self.context.add_tool_result(tid, fname, output)
+                    save_message(self.session_id, {"role": "tool", "tool_call_id": tid, "name": fname, "content": output})
 
                 self._log(f"[Iter {iteration}/{self.max_iterations}]\n")
                 continue

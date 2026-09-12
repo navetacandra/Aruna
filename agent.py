@@ -135,13 +135,8 @@ def expand_at_mentions(user_input: str) -> str:
                 return _handle_binary_file(p)
             # Text file
             try:
-                size = p.stat().st_size
-                if size > 500 * 1024:
-                    return f"[File: {p} | {size} bytes too large, use 'read' tool with offset/limit or grep]"
                 text = p.read_text(encoding="utf-8", errors="ignore")
-                if len(text) > 8000:
-                    return f"[File: {p} | {size} bytes, {len(text)} chars - truncated preview 8000 chars]\n{text[:8000]}\n...[truncated {len(text)-8000} chars]..."
-                return f"[File: {p} | {size} bytes]\n{text}"
+                return f"[File: {p} | {p.stat().st_size} bytes]\n{text}"
             except Exception as e:
                 return f"[File: {p} | read error: {e}]"
         except Exception as e:
