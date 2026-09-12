@@ -557,10 +557,74 @@ def main():
             sys.exit(0)
         return
 
+    def read_multiline_input(prompt: str = "\n> ") -> str:
+        """Read input with multiline support: handles pasted multiline and triple-quote blocks."""
+        try:
+            first = input(prompt)
+        except (EOFError, KeyboardInterrupt):
+            raise
+        # If input starts with triple quotes or ```, read until closing delimiter
+        stripped = first.strip()
+        if stripped.startswith('"""') or stripped.startswith("'''") or stripped.startswith("```"):
+            delim = '"""' if '"""' in first else "'''" if "'''" in first else "```"
+            if first.count(delim) >= 2 and first.strip().endswith(delim) and len(first.strip()) > len(delim):
+                return first
+            lines = [first]
+            while True:
+                try:
+                    line = input()
+                except EOFError:
+                    break
+                lines.append(line)
+                if delim in line:
+                    break
+            return "\n".join(lines)
+        # Check for pasted multiline: collect additional lines available without blocking
+        lines = [first]
+        # Helper to check if input is available
+        def _has_input():
+            try:
+                import msvcrt
+                return msvcrt.kbhit()
+            except ImportError:
+                try:
+                    import select
+                    return bool(select.select([sys.stdin], [], [], 0)[0])
+                except:
+                    return False
+        import time as _time
+        _time.sleep(0.04)  # let paste buffer fill
+        # Collect all immediately available lines (paste)
+        while _has_input():
+            try:
+                # Use input() which will read next line (paste is already buffered, so non-blocking)
+                nxt = input()
+                # If we get an empty line after a single-line input that was not a paste, treat as end
+                # But for paste, empty lines are part of content, so keep them
+                lines.append(nxt)
+            except (EOFError, KeyboardInterrupt):
+                break
+            _time.sleep(0.01)
+            if not _has_input():
+                break
+        if len(lines) > 1:
+            return "\n".join(lines)
+        if first.endswith("\\"):
+            while lines[-1].endswith("\\"):
+                try:
+                    nxt = input("... ")
+                    lines.append(nxt)
+                    if not nxt.endswith("\\"):
+                        break
+                except:
+                    break
+            return "\n".join(l.rstrip("\\") for l in lines)
+        return first
+
     # Interactive REPL
     while True:
         try:
-            user_input = input("\n> ")
+            user_input = read_multiline_input("\n> ")
         except EOFError:
             print("\n[exit EOF]", file=sys.stderr)
             break
