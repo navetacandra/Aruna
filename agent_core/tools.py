@@ -408,35 +408,107 @@ def tool_bash(command: str = None, workdir: str = ".", timeout: int = 120000, **
     wd = pathlib.Path(workdir) if workdir else pathlib.Path(".")
     if not wd.exists():
         return f"Error: workdir does not exist: {workdir}"
-    try:
-        # timeout ms -> s
+    # Handle ';' correctly on Windows (cmd doesn't support ';' as separator)
+    # Split commands by ';' outside quotes and execute sequentially
+    def split_commands(cmd: str):
+        parts = []
+        cur = []
+        in_single = False
+        in_double = False
+        escaped = False
+        for ch in cmd:
+            if escaped:
+                cur.append(ch)
+                escaped = False
+                continue
+            if ch == "\\" and not in_single:
+                # handle escape
+                escaped = True
+                cur.append(ch)
+                continue
+            if ch == "'" and not in_double:
+                in_single = not in_single
+                cur.append(ch)
+                continue
+            if ch == '"' and not in_single:
+                in_double = not in_double
+                cur.append(ch)
+                continue
+            if ch == ";" and not in_single and not in_double:
+                part = "".join(cur).strip()
+                if part:
+                    parts.append(part)
+                cur = []
+                continue
+            cur.append(ch)
+        tail = "".join(cur).strip()
+        if tail:
+            parts.append(tail)
+        return parts if len(parts) > 1 else [cmd]
+
+    cmds = split_commands(command)
+    # If only one command or not Windows, use direct execution (shell will handle)
+    # For consistency, if multiple commands detected, run sequentially
+    if len(cmds) == 1:
+        try:
+            timeout_s = max(1, (timeout or 120000) / 1000)
+            result = subprocess.run(
+                command,
+                shell=True,
+                cwd=str(wd),
+                capture_output=True,
+                text=True,
+                timeout=timeout_s,
+                encoding="utf-8",
+                errors="ignore"
+            )
+            out = ""
+            if result.stdout:
+                out += result.stdout
+            if result.stderr:
+                out += ("\n[stderr]\n" + result.stderr if out else result.stderr)
+            if not out:
+                out = f"(no output) exit={result.returncode}"
+            else:
+                out = f"[exit {result.returncode}]\n" + out
+            return _truncate(out)
+        except subprocess.TimeoutExpired:
+            return f"Error: timeout after {timeout}ms: {command}"
+        except Exception as e:
+            return f"Error bash '{command}': {e}"
+    else:
+        # Multiple commands via ';' - execute sequentially
+        outputs = []
         timeout_s = max(1, (timeout or 120000) / 1000)
-        # Windows: shell=True required, use bash if available else cmd
-        # We use shell=True so command string is executed directly
-        result = subprocess.run(
-            command,
-            shell=True,
-            cwd=str(wd),
-            capture_output=True,
-            text=True,
-            timeout=timeout_s,
-            encoding="utf-8",
-            errors="ignore"
-        )
-        out = ""
-        if result.stdout:
-            out += result.stdout
-        if result.stderr:
-            out += ("\n[stderr]\n" + result.stderr if out else result.stderr)
-        if not out:
-            out = f"(no output) exit={result.returncode}"
-        else:
-            out = f"[exit {result.returncode}]\n" + out
-        return _truncate(out)
-    except subprocess.TimeoutExpired:
-        return f"Error: timeout after {timeout}ms: {command}"
-    except Exception as e:
-        return f"Error bash '{command}': {e}"
+        per_cmd_timeout = max(1, timeout_s / len(cmds))
+        for sub in cmds:
+            try:
+                result = subprocess.run(
+                    sub,
+                    shell=True,
+                    cwd=str(wd),
+                    capture_output=True,
+                    text=True,
+                    timeout=per_cmd_timeout,
+                    encoding="utf-8",
+                    errors="ignore"
+                )
+                out = ""
+                if result.stdout:
+                    out += result.stdout
+                if result.stderr:
+                    out += ("\n[stderr]\n" + result.stderr if out else result.stderr)
+                if not out:
+                    out = f"(no output) exit={result.returncode}"
+                else:
+                    out = f"[exit {result.returncode}] $ {sub}\n" + out
+                outputs.append(out)
+                # If command failed and we use ';' (not &&), continue anyway
+            except subprocess.TimeoutExpired:
+                outputs.append(f"Error: timeout after {per_cmd_timeout}s: {sub}")
+            except Exception as e:
+                outputs.append(f"Error bash '{sub}': {e}")
+        return _truncate("\n".join(outputs))
 
 # Skill tools will be injected via skills.py at runtime, but provide stubs
 def tool_skill_list() -> str:
