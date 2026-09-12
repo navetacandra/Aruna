@@ -1,6 +1,7 @@
 """JSONL history per session in .agent/hists/<session_id>.jsonl"""
 import json
 import pathlib
+import sys
 import time
 import uuid
 from typing import Any, Dict, List, Optional
@@ -23,8 +24,9 @@ def append_history(session_id: str, entry: Dict[str, Any], hists_dir: str = None
     entry = dict(entry)
     entry.setdefault("ts", time.time())
     entry.setdefault("session_id", session_id)
+    line = json.dumps(entry, ensure_ascii=False) + "\n"
     with open(p, "a", encoding="utf-8") as f:
-        f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        f.write(line)
 
 def load_history(session_id: str, hists_dir: str = None) -> List[Dict[str, Any]]:
     if hists_dir is None:
@@ -40,7 +42,9 @@ def load_history(session_id: str, hists_dir: str = None) -> List[Dict[str, Any]]
                 continue
             try:
                 out.append(json.loads(line))
-            except:
+            except Exception as e:
+                # Log corrupted line instead of silently dropping
+                print(f"[history] warning: corrupted line skipped: {e}", file=sys.stderr)
                 continue
     return out
 

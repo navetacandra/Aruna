@@ -23,6 +23,7 @@ Fallback ONLY to base opencode.ai/zen/v1, update state if fallback occurs.
 import json
 import os
 import pathlib
+import sys
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -369,8 +370,10 @@ def _get_mime_and_b64(path_str: str) -> Optional[Tuple[str, str]]:
             return None
     try:
         data = p.read_bytes()
+        original_size = len(data)
         if len(data) > 8*1024*1024:
             data = data[:8*1024*1024]
+            print(f"[warning] File {p} truncated from {original_size} to 8MB for API (use offset/limit for large files)", file=sys.stderr)
         mime = None
         if data.startswith(b"\xFF\xD8\xFF"):
             mime = "image/jpeg"
@@ -387,7 +390,8 @@ def _get_mime_and_b64(path_str: str) -> Optional[Tuple[str, str]]:
         mime = mime or "application/octet-stream"
         b64 = _b64.b64encode(data).decode("ascii")
         return mime, b64
-    except:
+    except Exception as e:
+        print(f"[error] Failed to read {p}: {e}", file=sys.stderr)
         return None
 
 def _has_binary_marker(text: str) -> bool:
@@ -443,9 +447,29 @@ def save_provider_state(state: Dict[str, Any]):
     p = pathlib.Path(PROVIDER_STATE_FILE)
     p.parent.mkdir(parents=True, exist_ok=True)
     try:
-        p.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+        text = json.dumps(state, ensure_ascii=False, indent=2)
+        # Atomic write with lock for concurrent sub-agents
+        with open(p, "w", encoding="utf-8") as f:
+            try:
+                import fcntl
+                fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+                f.write(text)
+                f.flush()
+                fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+            except ImportError:
+                try:
+                    import msvcrt
+                    f.write(text)
+                    f.flush()
+                except:
+                    f.write(text)
+            except:
+                f.write(text)
     except:
-        pass
+        try:
+            p.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+        except:
+            pass
 
 def update_provider_state(model: str, provider: str, endpoint: str, base_url: str):
     state = load_provider_state()

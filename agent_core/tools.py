@@ -235,6 +235,17 @@ def tool_read(filePath: str = None, offset: int = 1, limit: int = 2000, **kwargs
             import mimetypes as _mt
             if not mime:
                 mime,_ = _mt.guess_type(str(p))
+                # Handle additional image types
+                if not mime or mime == "application/octet-stream":
+                    ext_lower = p.suffix.lower()
+                    if ext_lower == ".svg":
+                        mime = "image/svg+xml"
+                    elif ext_lower in (".heic", ".heif"):
+                        mime = "image/heic"
+                    elif ext_lower in (".tiff", ".tif"):
+                        mime = "image/tiff"
+                    else:
+                        mime = "image/jpeg"
                 mime = mime or "image/jpeg"
             abs_path = str(p.resolve())
             # Marker per b.md - will be rejected if not a Response (providers.py)

@@ -52,11 +52,8 @@ def discover_skills(skills_dir: str = None) -> Dict[str, Dict[str, str]]:
     for child in base.iterdir():
         if not child.is_dir():
             continue
-        # look for SKILL.md case-insensitive
-        candidates = list(child.glob("SKILL.md")) + list(child.glob("skill.md")) + list(child.glob("SKILL.MD"))
-        if not candidates:
-            # look for any *.md in folder
-            candidates = list(child.glob("*.md"))
+        # look for SKILL.md case-insensitive (also handle Skill.md)
+        candidates = list(child.glob("SKILL.md")) + list(child.glob("skill.md")) + list(child.glob("Skill.md")) + list(child.glob("SKILL.MD")) + list(child.glob("skill.MD"))
         if not candidates:
             continue
         info = _parse_skill_file(candidates[0])

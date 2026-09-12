@@ -50,10 +50,34 @@ class PermissionManager:
         if self.is_auto_allowed(tool_name):
             return True
         # Show prompt to stderr so it doesn't interfere with stdout streaming
-        # Compact args format
-        preview = args_str[:300].replace("\n", " ")
-        if len(args_str) > 300:
-            preview += "..."
+        # Create human-readable preview without cutting mid-JSON
+        try:
+            import json as _json
+            parsed = _json.loads(args_str) if args_str.strip().startswith("{") else {}
+            if isinstance(parsed, dict):
+                # Show key fields like filePath, command, pattern
+                keys = ["filePath", "filepath", "path", "command", "pattern", "content"]
+                parts = []
+                for k in keys:
+                    if k in parsed and parsed[k]:
+                        v = str(parsed[k])[:100].replace("\n", " ")
+                        parts.append(f"{k}={v}")
+                if parts:
+                    preview = ", ".join(parts)
+                    if len(preview) > 300:
+                        preview = preview[:300] + "..."
+                else:
+                    preview = args_str[:300].replace("\n", " ")
+                    if len(args_str) > 300:
+                        preview += "..."
+            else:
+                preview = args_str[:300].replace("\n", " ")
+                if len(args_str) > 300:
+                    preview += "..."
+        except:
+            preview = args_str[:300].replace("\n", " ")
+            if len(args_str) > 300:
+                preview += "..."
         print(f"\n[permission] Tool '{tool_name}' wants to run", file=sys.stderr)
         print(f"  args: {preview}", file=sys.stderr)
         print(f"  mode: {self.mode} | allow? (y=yes, n=no, a=always-accept-all, f=accept-fs) [y/n/a/f]: ", end="", file=sys.stderr, flush=True)

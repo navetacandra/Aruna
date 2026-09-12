@@ -4,8 +4,8 @@ import os
 OPENCODE_BASE_URL = os.environ.get("OPENCODE_BASE_URL", "https://opencode.ai")
 OPENCODE_UA = "opencode"
 
-# Default model - free & supports tool calling
-DEFAULT_MODEL = os.environ.get("OPENCODE_MODEL", "mimo-v2.5-free")
+# Default model - free, supports tool calling and vision (Response API for binary files)
+DEFAULT_MODEL = os.environ.get("OPENCODE_MODEL", "muse-spark-1.2-contributor-free")
 
 RESPONSES_MODELS = {
     "muse-spark-1.2-contributor-free",
