@@ -9,7 +9,7 @@ Minimal Python agent with no external dependencies, focused on **tool calling, f
 - **No cumbersome TUI**: Simple `input()` REPL - user input always at the bottom, streaming output to stdout, logs to stderr.
 - **LLM API**: Ported from `opencode.js` - supports `zen/v1/chat/completions` & `zen/v1/responses`, `muse-spark` detection, SSE streaming, `tool_calls` delta accumulation, `x-opencode-*` headers.
 - **Multi-SDK Fallback**: `agent_core/providers.py:1` - automatic fallback `openai_chat` ↔ `openai_responses` ↔ `anthropic_messages` with payload/tool conversion. Stores per-model state in `.agent/llm_provider_state.json` (updates on fallback, reused if same model). History stays OpenAI format, conversion only on Anthropic requests (`openai_messages_to_anthropic()`).
-- **Powerful Tool Calling**: 8 OpenAI-compatible tools:
+- **Powerful Tool Calling**: 9 OpenAI-compatible tools:
   - `read` - read file / list directory with `offset/limit`, truncate lines >2000
   - `write` - write file (auto mkdir -p)
   - `edit` - exact replace, prevents multi-match without `replaceAll`
@@ -17,7 +17,8 @@ Minimal Python agent with no external dependencies, focused on **tool calling, f
   - `grep` - regex search, skips `.git/node_modules/.venv`, cap 200 hits
   - `bash` - `subprocess.run` with `timeout`, `workdir`
   - `skill_list` / `skill_load` - skill system
-  - Truncate output >20k chars, friendly error handling.
+  - `spawn_agents` - spawn N sub-agents concurrently (each 5-12 iterations) for parallel tasks
+  - No truncate, friendly error handling.
 - **Agent Loop**: Iterative ReAct `max 25` iters - calls LLM, executes tools sequentially, feeds back, continues until `finish_reason != tool_calls`.
 - **Context Manager** (crucial): token estimation `chars/4`, auto-compaction when >85% `MAX_CONTEXT_TOKENS` (default 120k):
   - Keeps `system` + `KEEP_RECENT_MESSAGES=8` latest
@@ -30,6 +31,7 @@ Minimal Python agent with no external dependencies, focused on **tool calling, f
 - **Shell Escape**: `!` runs `subprocess.Popen` streaming & terminatable (Ctrl-C → `terminate()` → `kill()`).
 - **Thinking**: `/think` checks `is_responses_model()` - sets `loop.extra_body["reasoning_effort"]` for muse-spark, `None` for other models.
 - **File Input**: `@file` embeds text/binary (image/PDF) via `[[VISION_IMAGE:]]`/`[[INPUT_FILE:]]` markers. Binary files only supported via OpenAI Responses API (`muse-spark-1.2/1.3`); other models return `Model not supported`.
+- **Sub-Agents (Concurrent)**: `spawn_agents` tool spawns multiple sub-agents that run **concurrently in parallel** (ThreadPoolExecutor). Each sub-agent has its own context and tools (5-12 iterations), cannot spawn further sub-agents. Main iteration counts as 1 for N parallel tasks, saving `N-1` iterations. Use for parallel exploration, research, or multi-part tasks.
 
 ## Structure
 
@@ -89,6 +91,10 @@ OPENCODE_BASE_URL=https://opencode.ai AGENT_MAX_TOKENS=50000 python agent.py
 # File input (binary only via Responses)
 python agent.py --once '@"beboo.png" explain this image' --model muse-spark-1.2-contributor-free
 python agent.py --once '@"report.pdf" summarize this document' --model muse-spark-1.2-contributor-free
+
+# Sub-agents (parallel tasks, saves iterations)
+python agent.py --once "Explore src/ and tests/ in parallel via spawn_agents" --model muse-spark-1.2-contributor-free
+# LLM will call: spawn_agents(tasks=[{"task": "List Python files in src/", "label": "src"}, {"task": "List tests in tests/", "label": "tests"}]) -> both run concurrently
 ```
 
 ### REPL Commands (all without TUI, input always at bottom)
@@ -141,9 +147,9 @@ Stats: `ctx.token_usage()` -> `{tokens, max, percent, compactions}`. See `/token
 1. `context.add_user()` + `save_message()`
 2. Loop `max_iterations`:
    - `llm.chat(messages, tools, stream, on_delta)` - streaming direct print
-   - If `tool_calls`: save assistant + execute `execute_tool(name, args)` sequentially, log preview, `add_tool_result`, continue loop
+   - If `tool_calls`: save assistant + execute `execute_tool(name, args)` sequentially, **except `spawn_agents` which spawns N sub-agents concurrently via `ThreadPoolExecutor` (each 5-12 iterations, no recursive spawn) and returns combined results as 1 iteration**
    - If not: save assistant, return `content`
-3. JSONL history per turn.
+3. JSONL history per turn. Sub-agents run in parallel, saving `N-1` iterations for main agent.
 
 LLM Headers: `Authorization: Bearer public`, `User-Agent: opencode`, `x-opencode-session`, `x-opencode-request` (uuid), `x-opencode-project: global` - mirrored from `opencode.js:85`. All fallbacks only to `OPENCODE_BASE_URL/zen/v1` (as instructed).
 

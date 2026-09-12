@@ -143,6 +143,33 @@ TOOL_DEFINITIONS: List[Dict[str, Any]] = [
             }
         }
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "spawn_agents",
+            "description": "Spawn multiple sub-agents to handle tasks concurrently. Each sub-agent runs independently with its own context and tools. Use to parallelize work and avoid hitting max iterations. Tasks run in parallel. Use for exploration, research, or independent subtasks.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "tasks": {
+                        "type": "array",
+                        "description": "List of tasks to delegate (each runs concurrently in a separate sub-agent)",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "task": {"type": "string", "description": "Task description for sub-agent (be specific)"},
+                                "label": {"type": "string", "description": "Short label for this sub-agent (e.g., 'explorer', 'analyzer')"}
+                            },
+                            "required": ["task"],
+                            "additionalProperties": False
+                        }
+                    }
+                },
+                "required": ["tasks"],
+                "additionalProperties": False
+            }
+        }
+    },
 ]
 
 # ---------- Implementation ----------
@@ -519,6 +546,11 @@ def tool_skill_load(name: str) -> str:
     from .skills import load_skill
     return load_skill(name)
 
+def tool_spawn_agents(tasks: List[Dict[str, Any]] = None, **kwargs) -> str:
+    # This is a placeholder - actual execution is handled in loop.py with proper context
+    # If called directly, return error
+    return "Error: spawn_agents must be called via AgentLoop (concurrent sub-agents)"
+
 
 # Dispatcher
 TOOL_IMPL: Dict[str, Any] = {
@@ -530,6 +562,7 @@ TOOL_IMPL: Dict[str, Any] = {
     "bash": tool_bash,
     "skill_list": lambda **kw: tool_skill_list(),
     "skill_load": tool_skill_load,
+    "spawn_agents": tool_spawn_agents,
 }
 
 def execute_tool(name: str, arguments: Any) -> str:
