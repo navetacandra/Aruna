@@ -38,6 +38,7 @@ class AgentLoop:
         self.permission_manager = permission_manager
         self.extra_body = extra_body or {}
         self._tool_history: List[str] = []  # list of "fname:args_json" for stuck detection
+        self._read_cache: Dict[str, str] = {}  # cache for read results to avoid re-reading same file
         self._loaded_tools: set = set()
 
     def _select_tools_for_input(self, user_input: str) -> List[Dict[str, Any]]:
@@ -305,7 +306,7 @@ class AgentLoop:
                         fp = parsed.get("filePath") or parsed.get("filepath") or parsed.get("file_path") or parsed.get("path") or ""
                         self._log(f"<<< {fname} {fp}".strip())
 
-                    # Track history for stuck detection (no cache)
+                    # Track history for stuck detection (no cache) - but check read cache first
                     try:
                         parsed_args = json.loads(fargs) if isinstance(fargs, str) else fargs
                         cache_key = f"{fname}:{json.dumps(parsed_args, sort_keys=True, ensure_ascii=False)}"
@@ -314,6 +315,22 @@ class AgentLoop:
                     self._tool_history.append(cache_key)
                     if len(self._tool_history) > 20:
                         self._tool_history = self._tool_history[-20:]
+                    # Efficient read: if same file read recently, return cached without re-executing
+                    if fname == "read":
+                        try:
+                            fp = parsed_args.get("filePath") or parsed_args.get("filepath") or parsed_args.get("file_path") or parsed_args.get("path") or ""
+                            if fp and fp in self._read_cache:
+                                # Check if same offset/limit - if not, allow
+                                # For now, if same filePath and same offset/limit, use cache
+                                cached = self._read_cache.get(cache_key) or self._read_cache.get(fp)
+                                if cached:
+                                    output = cached + "\n\n[NOTE: This file was already read recently. Reusing previous result to save iterations. Use grep to find specific sections instead of re-reading full file.]"
+                                    self.context.add_tool_result(tid, fname, output)
+                                    save_message(self.session_id, {"role": "tool", "tool_call_id": tid, "name": fname, "content": output})
+                                    self._log(f"[read cache] {fp} already read, reusing")
+                                    continue
+                        except:
+                            pass
                     # Permission gate for hardware tools
                     if self.permission_manager is not None:
                         try:
@@ -331,6 +348,15 @@ class AgentLoop:
                     # Show bash output directly
                     if fname == "bash":
                         self._log(f"[bash output]\n{output}")
+                    # Cache read results for efficiency
+                    if fname == "read":
+                        try:
+                            fp = parsed_args.get("filePath") or parsed_args.get("filepath") or parsed_args.get("file_path") or parsed_args.get("path") or ""
+                            if fp:
+                                self._read_cache[cache_key] = output
+                                self._read_cache[fp] = output
+                        except:
+                            pass
                     self.context.add_tool_result(tid, fname, output)
                     save_message(self.session_id, {"role": "tool", "tool_call_id": tid, "name": fname, "content": output})
 
