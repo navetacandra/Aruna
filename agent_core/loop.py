@@ -35,8 +35,7 @@ class AgentLoop:
         self.tool_defs: List[Dict[str, Any]] = []
         self.permission_manager = permission_manager
         self.extra_body = extra_body or {}
-        self._tool_cache: Dict[str, str] = {}
-        self._tool_history: List[str] = []  # list of "fname:args_json" for dedup
+        self._tool_history: List[str] = []  # list of "fname:args_json" for stuck detection
         self._loaded_tools: set = set()
 
     def _select_tools_for_input(self, user_input: str) -> List[Dict[str, Any]]:
@@ -212,6 +211,7 @@ class AgentLoop:
                     self._log(f"[lazy] additional tool loaded, asking LLM to try again")
                     self.context.messages.append({"role": "user", "content": f"[SYSTEM] The tool you need is now available: {', '.join([t['function']['name'] for t in self.tool_defs])}. Use that tool to complete the task, don't just answer with text."})
                     save_message(self.session_id, {"role": "user", "content": f"[SYSTEM] Available tools: {', '.join([t['function']['name'] for t in self.tool_defs])}"})
+                    self._log(f"[Iter {iteration}/{self.max_iterations}]\n")
                     continue
                 # Done - no tools
                 # If stream=False, print content now (handle UTF-8 on Windows)
@@ -227,6 +227,7 @@ class AgentLoop:
                 self.context.add_assistant(content)
                 save_message(self.session_id, {"role": "assistant", "content": content, "model": self.llm.model, "think_variant": _current_think()})
                 final_answer = content
+                self._log(f"[Iter {iteration}/{self.max_iterations}]\n")
                 break
             else:
                 # Tool calls present: save assistant message + execute tools (include model & think)
@@ -289,26 +290,15 @@ class AgentLoop:
                         fp = parsed.get("filePath") or parsed.get("filepath") or parsed.get("file_path") or parsed.get("path") or ""
                         self._log(f"<<< {fname} {fp}".strip())
 
-                    # Deduplication: check if same tool with same args was called recently
+                    # Track history for stuck detection (no cache)
                     try:
                         parsed_args = json.loads(fargs) if isinstance(fargs, str) else fargs
                         cache_key = f"{fname}:{json.dumps(parsed_args, sort_keys=True, ensure_ascii=False)}"
                     except:
                         cache_key = f"{fname}:{fargs}"
-                    # Track history for frequency detection
                     self._tool_history.append(cache_key)
                     if len(self._tool_history) > 20:
                         self._tool_history = self._tool_history[-20:]
-                    # If already called in last 5 calls with same result, skip and warn
-                    if cache_key in self._tool_cache:
-                        # Check if this is a repeated call within short window (last 5)
-                        recent_calls = self._tool_history[-6:-1]  # 5 before current
-                        if cache_key in recent_calls:
-                            self._log(f"[skip] {fname} with same args was called recently, using cache")
-                            output = self._tool_cache[cache_key] + "\n\n[NOTE: This tool was already called previously with the same arguments. Result is cached to avoid loops. Do not call again with the same arguments.]"
-                            self.context.add_tool_result(tid, fname, output)
-                            save_message(self.session_id, {"role": "tool", "tool_call_id": tid, "name": fname, "content": output})
-                            continue
                     # Permission gate for hardware tools
                     if self.permission_manager is not None:
                         try:
@@ -330,8 +320,6 @@ class AgentLoop:
                     if fname == "bash":
                         preview = output[:3000] + ("...[truncated]" if len(output) > 3000 else "")
                         self._log(f"[bash output]\n{preview}")
-                    # Save to cache for deduplication (full)
-                    self._tool_cache[cache_key] = output
                     from agent_core.config import MAX_TOOL_OUTPUT_CHARS
                     to_store = output
                     if len(output) > MAX_TOOL_OUTPUT_CHARS:
@@ -339,6 +327,7 @@ class AgentLoop:
                     self.context.add_tool_result(tid, fname, to_store)
                     save_message(self.session_id, {"role": "tool", "tool_call_id": tid, "name": fname, "content": to_store})
 
+                self._log(f"[Iter {iteration}/{self.max_iterations}]\n")
                 continue
         else:
             # max iterations reached
