@@ -86,6 +86,32 @@ def get_last_model_and_think(session_id: str, hists_dir: str = None) -> tuple[Op
                 last_think = msg.get("think_variant")
     return last_model, last_think
 
+def get_last_max_iterations(session_id: str, hists_dir: str = None) -> Optional[int]:
+    """Get the last max_iterations from history. Returns int or None."""
+    if hists_dir is None:
+        hists_dir = HISTS_DIR
+    entries = load_history(session_id, hists_dir)
+    last_max = None
+    for e in entries:
+        if "max_iterations" in e:
+            try:
+                last_max = int(e.get("max_iterations"))
+            except:
+                pass
+        if "max_iter" in e:
+            try:
+                last_max = int(e.get("max_iter"))
+            except:
+                pass
+        if "message" in e and isinstance(e["message"], dict):
+            msg = e["message"]
+            if "max_iterations" in msg:
+                try:
+                    last_max = int(msg.get("max_iterations"))
+                except:
+                    pass
+    return last_max
+
 def list_sessions(hists_dir: str = None) -> List[str]:
     if hists_dir is None:
         hists_dir = HISTS_DIR

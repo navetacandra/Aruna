@@ -16,7 +16,8 @@ Commands REPL:
   /reload                  reload state without losing context
   /think [variant]         view/select thinking variant (none/low/medium/high/xhigh)
   /tool-call [mode]        tool permission: accept-all, accept-fs, ask
-  /info                    show model, token, chat length
+  /max-iter [n]            view/set max iterations (1-100, saved per session)
+  /info                    show model, token, chat length, max-iter
   @file_name               embed file (text/binary pdf/photo) into prompt, e.g.: @README.md @"my file.pdf"
   !<command>               run shell directly (terminatable via Ctrl-C)
   /help, /clear, /session, /exit
@@ -33,7 +34,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).parent))
 
 from agent_core.config import DEFAULT_MODEL, HISTS_DIR
 from agent_core.context import ContextManager
-from agent_core.history import generate_session_id, list_sessions, load_messages, get_last_model_and_think
+from agent_core.history import generate_session_id, list_sessions, load_messages, get_last_model_and_think, get_last_max_iterations, save_message
 from agent_core.llm import LLMClient, fetch_models, is_responses_model
 from agent_core.loop import AgentLoop
 from agent_core.prompts import build_system_prompt
@@ -365,7 +366,30 @@ def handle_tool_call(arg: str, pm: PermissionManager):
     pm.set_mode(arg)
     print(f"[tool-call] mode -> {pm.status()}", file=sys.stderr)
 
-def handle_info(ctx: ContextManager, llm: LLMClient, think_variant: str, session_id: str = "", permission_manager=None):
+def handle_max_iter(arg: str, loop: AgentLoop, session_id: str = ""):
+    arg = arg.strip() if arg else ""
+    if not arg:
+        print(f"[max-iter] current: {loop.max_iterations}", file=sys.stderr)
+        print(f"  usage: /max-iter <n>  (e.g. /max-iter 50)", file=sys.stderr)
+        print(f"  range: 1-100", file=sys.stderr)
+        return
+    try:
+        n = int(arg)
+        if n < 1 or n > 100:
+            print(f"[max-iter] invalid value: {arg}. Must be 1-100", file=sys.stderr)
+            return
+        loop.max_iterations = n
+        # persist for session
+        if session_id:
+            try:
+                save_message(session_id, {"role": "system", "content": f"[max-iter set to {n}]", "max_iterations": n})
+            except Exception as e:
+                print(f"[max-iter] failed to save: {e}", file=sys.stderr)
+        print(f"[max-iter] set to {n} (saved for session {session_id})", file=sys.stderr)
+    except ValueError:
+        print(f"[max-iter] invalid number: {arg}. Usage: /max-iter <n>", file=sys.stderr)
+
+def handle_info(ctx: ContextManager, llm: LLMClient, think_variant: str, session_id: str = "", permission_manager=None, loop=None):
     u = ctx.token_usage()
     total_msgs = len(ctx.messages)
     user_msgs = sum(1 for m in ctx.messages if m.get("role") == "user")
@@ -376,6 +400,8 @@ def handle_info(ctx: ContextManager, llm: LLMClient, think_variant: str, session
     print(f"Message: {user_msgs} (total {total_msgs}, system 1)", file=sys.stderr)
     if permission_manager:
         print(f"Permission: {permission_manager.status()}", file=sys.stderr)
+    if loop is not None:
+        print(f"Max-iter: {loop.max_iterations}", file=sys.stderr)
 
 def main():
     args = parse_args()
@@ -453,8 +479,17 @@ def main():
                     # Because history stores what was actually used last, we prioritize history
                     print(f"[history] using last thinking: {last_think} (CLI: {think_variant})", file=sys.stderr)
                     think_variant = last_think
+            # Also load saved max-iter for session
+            last_max = get_last_max_iterations(session_id)
+            if last_max is not None:
+                if args.max_iterations is None:
+                    # Only use history if CLI didn't explicitly set --max-iterations
+                    loop_kwargs["max_iterations"] = last_max
+                    print(f"[history] using last max-iter from session: {last_max}", file=sys.stderr)
+                else:
+                    print(f"[history] saved max-iter {last_max} ignored (CLI --max-iterations {args.max_iterations} takes precedence)", file=sys.stderr)
         except Exception as e:
-            print(f"[history] failed to load last model/think: {e}", file=sys.stderr)
+            print(f"[history] failed to load last model/think/max-iter: {e}", file=sys.stderr)
 
     extra_body = {}
     if think_variant and think_variant != "none":
@@ -568,7 +603,7 @@ def main():
             think_variant = handle_think(arg, llm, loop, think_variant)
             continue
 
-        # /tool-call
+                # /tool-call
         if low.startswith("/tool-call") or low.startswith("/toolcall"):
             # support dash or not
             if low.startswith("/tool-call"):
@@ -578,9 +613,21 @@ def main():
             handle_tool_call(arg, pm)
             continue
 
+        # /max-iter /max-iterations
+        if low.startswith("/max-iter"):
+            # handle /max-iter and /max-iterations with optional hyphen
+            # extract arg after command
+            # len "/max-iter" = 9, "/max-iterations" = 15
+            if low.startswith("/max-iterations"):
+                arg = stripped[15:].strip()
+            else:
+                arg = stripped[9:].strip()
+            handle_max_iter(arg, loop, session_id)
+            continue
+
         # /info
         if low == "/info" or low.startswith("/info "):
-            handle_info(ctx, llm, think_variant, session_id, pm)
+            handle_info(ctx, llm, think_variant, session_id, pm, loop)
             continue
 
         # Legacy & helpers
@@ -598,7 +645,8 @@ Commands:
   /reload                reload state without losing context
   /think [variant]       view/select thinking: none/low/medium/high/xhigh (None if model not supported)
   /tool-call [mode]      tool permission: accept-all, accept-fs, ask
-  /info                  show model, token, chat length
+  /max-iter [n]          view/set max iterations 1-100 (saved per session)
+  /info                  show model, token, chat length, max-iter
   @file_name             embed file into prompt (text/pdf/photo), e.g.: @README.md @"photo.jpg" @doc.pdf
   !<command>             run shell directly (Ctrl-C to terminate)
   /clear                 clear context (reset)
