@@ -41,32 +41,9 @@ class AgentLoop:
         self._loaded_tools: set = set()
 
     def _select_tools_for_input(self, user_input: str) -> List[Dict[str, Any]]:
-        """Select only the required tools based on user prompt (lazy loading)."""
-        text = user_input.lower()
-        needed = set()
-        # Always provide skill discovery as lazy entry point
-        # But don't load all skill content, only via tool
-        # Heuristic based on keywords
-        if any(k in text for k in ["baca", "read", "lihat", "tampilkan", "file", "cat", "ls"]):
-            needed.update(["read", "glob"])
-        if any(k in text for k in ["tulis", "buat", "write", "simpan", "edit", "ubah", "ganti"]):
-            needed.update(["write", "edit", "read"])
-        if any(k in text for k in ["cari", "search", "grep", "temukan"]):
-            needed.update(["grep", "glob"])
-        if any(k in text for k in ["jalan", "exec", "bash", "command", "shell", "run", "eksekusi", "pwd", "ls", "python", "pip", "npm"]):
-            needed.update(["bash"])
-        if any(k in text for k in ["skill", "kemampuan", "lakukan"]):
-            needed.update(["skill_list", "skill_load"])
-        if any(k in text for k in ["parallel", "concurrent", "multiple", "sekaligus", "bersamaan", "spawn", "subagent", "sub-agent", "berbarengan", "simult"]):
-            needed.update(["spawn_agents"])
-        # If nothing matches, provide minimal discovery tools + read/bash as fallback
-        if not needed:
-            needed.update(["read", "bash", "skill_list"])
-        # Always include skill discovery if not already present
-        if "skill_list" not in needed and "skill" in text:
-            needed.add("skill_list")
-        # Always allow sub-agents on demand (for parallel tasks)
-        # They will be loaded via _ensure_tool_loaded if LLM requests them
+        """Select tools - now loads all core tools by default to avoid hiding capabilities."""
+        # Always load core tools to avoid LLM blindness - lazy loading was hiding critical tools
+        needed = {"read", "write", "edit", "glob", "grep", "bash", "spawn_agents", "skill_list", "skill_load"}
         # Build list of defs that are only required
         defs = [self._all_tool_defs[n] for n in needed if n in self._all_tool_defs]
         # Track loaded

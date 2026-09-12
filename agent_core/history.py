@@ -118,7 +118,10 @@ def list_sessions(hists_dir: str = None) -> List[str]:
     p = pathlib.Path(hists_dir)
     if not p.exists():
         return []
-    return sorted([f.stem for f in p.glob("*.jsonl")])
+    # Sort by modification time (most recent last) to make --continue resume the latest session
+    files = list(p.glob("*.jsonl"))
+    files.sort(key=lambda f: f.stat().st_mtime)
+    return [f.stem for f in files]
 
 def save_message(session_id: str, message: Dict[str, Any], hists_dir: str = None):
     if hists_dir is None:

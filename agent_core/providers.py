@@ -141,10 +141,40 @@ def openai_messages_to_anthropic(messages: List[Dict[str, Any]]) -> Tuple[Option
         if role == "tool":
             tool_use_id = m.get("tool_call_id") or m.get("id") or "unknown"
             tool_content = m.get("content") or ""
-            block = {"type": "tool_result", "tool_use_id": tool_use_id, "content": str(tool_content)}
+            # Handle binary tool results for Anthropic (image/document)
+            has_image = isinstance(tool_content, str) and bool(VISION_IMAGE_RE.search(tool_content))
+            has_file = isinstance(tool_content, str) and bool(INPUT_FILE_RE.search(tool_content))
+            if has_image or has_file:
+                # For binary, create tool_result with document/image blocks
+                clean_img, imgs = _extract_vision_images(tool_content) if has_image else (tool_content, [])
+                clean, files = _extract_input_files(clean_img) if has_file else (clean_img, [])
+                # Build content list for tool_result
+                content_list: List[Dict[str, Any]] = []
+                if clean.strip():
+                    content_list.append({"type": "text", "text": clean})
+                for mime, b64 in imgs:
+                    content_list.append({"type": "image", "source": {"type": "base64", "media_type": mime, "data": b64}})
+                for fpath, mime, b64 in files:
+                    content_list.append({"type": "document", "source": {"type": "base64", "media_type": mime, "data": b64}})
+                if not content_list:
+                    content_list.append({"type": "text", "text": ""})
+                block = {"type": "tool_result", "tool_use_id": tool_use_id, "content": content_list}
+            else:
+                block = {"type": "tool_result", "tool_use_id": tool_use_id, "content": str(tool_content)}
+            # Ensure we don't create consecutive user messages - always group tool_results
             if anthropic_msgs and anthropic_msgs[-1].get("role") == "user":
                 last = anthropic_msgs[-1]
+                # Convert string content to list if needed
+                if isinstance(last.get("content"), str):
+                    last["content"] = [{"type": "text", "text": last["content"]}]
                 if isinstance(last.get("content"), list) and any(b.get("type")=="tool_result" for b in last["content"]):
+                    last["content"].append(block)
+                elif isinstance(last.get("content"), list):
+                    # Last user was text, convert to tool_result grouping
+                    # Check if previous assistant had tool_use - if so, append
+                    # For safety, create new user message with tool_result
+                    # But to avoid consecutive user, we should merge
+                    # If last user has only text, append tool_result to it
                     last["content"].append(block)
                 else:
                     anthropic_msgs.append({"role": "user", "content": [block]})
@@ -240,43 +270,57 @@ def openai_messages_to_responses(messages: List[Dict[str, Any]]) -> Tuple[Option
                     # empty assistant without tools, still skip? but we insert empty to preserve turn
                     inputs.append({"role": "assistant", "content": [{"type": "output_text", "text": ""}]})
             else:
-                # has tool_calls: represent as assistant with output_text + function_call
-                # In Responses API, function_call is a separate type, but we simplify to output_text + tool info in content
-                # For compatibility, combine text + tool_calls as input_text json
-                # However for request, we still send plain text and let tools be in separate payload
+                # Preserve tool_calls as function_call blocks for Responses history
                 text = content if isinstance(content, str) else ""
-                blocks = []
+                blocks: List[Dict[str, Any]] = []
                 if text.strip():
                     blocks.append({"type": "output_text", "text": text})
-                # tool_calls in responses are not sent via input, but via tools in payload, so no need to embed in input
-                # But we still need to represent that assistant previously called a tool, so add placeholder
-                # Simply: send assistant with text, tool result will be separate user input_text in next iteration (role tool)
+                for tc in tool_calls:
+                    fn = tc.get("function", {})
+                    name = fn.get("name", "")
+                    args_raw = fn.get("arguments", "{}")
+                    # Ensure args is a string JSON
+                    if isinstance(args_raw, dict):
+                        args_raw = json.dumps(args_raw, ensure_ascii=False)
+                    blocks.append({
+                        "type": "function_call",
+                        "call_id": tc.get("id") or f"call_{uuid.uuid4().hex[:8]}",
+                        "name": name,
+                        "arguments": args_raw if isinstance(args_raw, str) else json.dumps(args_raw, ensure_ascii=False)
+                    })
                 inputs.append({"role": "assistant", "content": blocks if blocks else [{"type": "output_text", "text": ""}]})
-                # tool results will be sent as separate user input_text in next iteration (role tool)
-                # we don't embed tool_calls in input, because Responses API handles tools via output
                 continue
         if role == "tool":
-            # tool result -> user input_text, supports file input b.md
+            # Tool result -> function_call_output for Responses (preserves call_id correlation)
             text = str(content)
+            tool_call_id = m.get("tool_call_id") or m.get("id") or "unknown"
             has_image = bool(VISION_IMAGE_RE.search(text))
             has_file = bool(INPUT_FILE_RE.search(text))
             if has_image or has_file:
                 clean_img, imgs = _extract_vision_images(text) if has_image else (text, [])
                 clean, files = _extract_input_files(clean_img) if has_file else (clean_img, [])
-                prefix = f"Tool result ({m.get('name','')}): {clean}" if clean.strip() else f"Tool result ({m.get('name','')}):"
-                parts: List[Dict[str, Any]] = []
-                if prefix.strip():
-                    parts.append({"type": "input_text", "text": prefix})
-                for mime, b64 in imgs:
-                    parts.append({"type": "input_image", "image_url": f"data:{mime};base64,{b64}", "detail": "auto"})
-                for fpath, mime, b64 in files:
-                    fname = pathlib.Path(fpath).name if fpath else "file"
-                    parts.append({"type": "input_file", "filename": fname, "file_data": f"data:{mime};base64,{b64}"})
-                if not parts:
-                    parts.append({"type": "input_text", "text": prefix})
-                inputs.append({"role": "user", "content": parts})
+                # For binary tool results, use function_call_output with attached files as well
+                # First, the text output
+                if clean.strip():
+                    inputs.append({"role": "user", "content": [{"type": "input_text", "text": f"Tool result ({m.get('name','')}): {clean}"}]})
+                    # Then files as separate inputs if any
+                    for mime, b64 in imgs:
+                        inputs.append({"role": "user", "content": [{"type": "input_image", "image_url": f"data:{mime};base64,{b64}", "detail": "auto"}]})
+                    for fpath, mime, b64 in files:
+                        fname = pathlib.Path(fpath).name if fpath else "file"
+                        inputs.append({"role": "user", "content": [{"type": "input_file", "filename": fname, "file_data": f"data:{mime};base64,{b64}"}]})
+                else:
+                    # Only files
+                    for mime, b64 in imgs:
+                        inputs.append({"role": "user", "content": [{"type": "input_image", "image_url": f"data:{mime};base64,{b64}", "detail": "auto"}]})
+                    for fpath, mime, b64 in files:
+                        fname = pathlib.Path(fpath).name if fpath else "file"
+                        inputs.append({"role": "user", "content": [{"type": "input_file", "filename": fname, "file_data": f"data:{mime};base64,{b64}"}]})
+                # Also add the function_call_output for correlation (required by Responses)
+                inputs.append({"role": "assistant", "content": [{"type": "function_call_output", "call_id": tool_call_id, "output": clean[:2000]}]})
             else:
-                inputs.append({"role": "user", "content": [{"type": "input_text", "text": f"Tool result ({m.get('name','')}): {text}"}]})
+                # Standard tool result as function_call_output
+                inputs.append({"role": "assistant", "content": [{"type": "function_call_output", "call_id": tool_call_id, "output": text[:5000]}]})
             continue
         # fallback
         inputs.append({"role": "user", "content": [{"type": "input_text", "text": str(content)}]})

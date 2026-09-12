@@ -118,26 +118,43 @@ def expand_at_mentions(user_input: str) -> str:
         if not raw:
             return match.group(0)
         p = pathlib.Path(raw)
-        # If path is relative and does not exist, try relative to cwd
+        # If path is relative and does not exist, check if it looks like a real file path
+        # Avoid poisoning context for @decorator or user@example.com
         if not p.exists():
-            # Try without @, maybe typo
-            return f"{match.group(0)} [file not found: {raw}]"
+            # If it doesn't look like a file path (no / or . or too short), leave untouched
+            if "/" not in raw and "\\" not in raw and "." not in raw:
+                return match.group(0)
+            # For email-like or decorator, don't inject [file not found] into LLM context
+            # Just return original and log to stderr
+            print(f"[embed] file not found (ignored): {raw}", file=sys.stderr)
+            return match.group(0)
         try:
             if p.is_dir():
                 try:
                     entries = sorted(os.listdir(p))
-                    preview = ", ".join(entries[:20])
+                    # Filter out noisy dirs for cleaner preview
+                    filtered = [e for e in entries if e not in (".git", "node_modules", ".venv", "venv", "__pycache__", ".agent")]
+                    # Show filtered, but count total
+                    preview_entries = filtered[:20] if filtered else entries[:20]
+                    preview = ", ".join(preview_entries)
                     if len(entries) > 20:
                         preview += f" ... (+{len(entries)-20} more)"
+                    if len(filtered) != len(entries):
+                        preview += f" [filtered {len(entries)-len(filtered)} hidden]"
                     return f"[Dir: {p} | {len(entries)} entries]\n{preview}"
                 except Exception as e:
                     return f"[Dir: {p} | error: {e}]"
             if _is_binary_file(p):
                 return _handle_binary_file(p)
-            # Text file
+            # Text file - check size to avoid blowing context
             try:
+                size = p.stat().st_size
+                # Prevent huge files from blowing context (limit 500KB per read, suggest using read tool for large files)
+                from agent_core.config import MAX_READ_BYTES
+                if size > MAX_READ_BYTES * 5:
+                    return f"[File: {p} | {size} bytes too large ({size//1024}KB), use 'read' tool with offset/limit or grep]"
                 text = p.read_text(encoding="utf-8", errors="ignore")
-                return f"[File: {p} | {p.stat().st_size} bytes]\n{text}"
+                return f"[File: {p} | {size} bytes]\n{text}"
             except Exception as e:
                 return f"[File: {p} | read error: {e}]"
         except Exception as e:
@@ -464,19 +481,24 @@ def main():
 
     # Thinking variant - initial from CLI
     think_variant = args.think.lower().strip() if args.think else DEFAULT_THINK
-    # If resuming session, try to use last model & think from history (per instructions)
+    # If resuming session, try to use last model & think from history
+    # CLI explicitly set values take precedence over history
     if args.session or args.cont:
         try:
             last_model, last_think = get_last_model_and_think(session_id)
+            # Model: only use history if CLI didn't explicitly change from default
             if last_model:
-                if last_model != llm.model:
+                cli_model_explicit = args.model != DEFAULT_MODEL
+                if cli_model_explicit:
+                    print(f"[history] saved model {last_model} ignored (CLI --model {args.model} takes precedence)", file=sys.stderr)
+                elif last_model != llm.model:
                     print(f"[history] using last model from session: {last_model} (CLI: {llm.model})", file=sys.stderr)
                     llm.model = last_model
             if last_think:
-                # last_think from history can be "none" or variant
-                if last_think != think_variant:
-                    # If CLI not explicit (args.think is None) or history differs, use history as last source of truth
-                    # Because history stores what was actually used last, we prioritize history
+                cli_think_explicit = args.think is not None
+                if cli_think_explicit:
+                    print(f"[history] saved thinking {last_think} ignored (CLI --think {args.think} takes precedence)", file=sys.stderr)
+                elif last_think != think_variant:
                     print(f"[history] using last thinking: {last_think} (CLI: {think_variant})", file=sys.stderr)
                     think_variant = last_think
             # Also load saved max-iter for session

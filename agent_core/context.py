@@ -60,6 +60,8 @@ class ContextManager:
         self.messages.append(msg)
 
     def add_tool_result(self, tool_call_id: str, name: str, content: str):
+        if len(content) > MAX_TOOL_OUTPUT_CHARS:
+            content = content[:MAX_TOOL_OUTPUT_CHARS] + f"\n...[TRUNCATED {len(content)-MAX_TOOL_OUTPUT_CHARS} chars]...\n"
         self.messages.append({
             "role": "tool",
             "tool_call_id": tool_call_id,
@@ -83,24 +85,39 @@ class ContextManager:
                 break
             force_compact = False  # only force once
             tokens = estimate_messages_tokens(self.messages)
-            # if still above threshold and many messages remain, reduce keep_recent and try again
+            # if still above threshold and many messages remain, try more aggressive compaction
             if tokens > threshold and len(self.messages) > self.keep_recent + 2:
-                # reduce keep_recent for next attempt (adaptive simulation)
-                # next _compact will keep fewer because we don't change keep_recent permanently,
-                # but we can directly cut the oldest recent messages
                 if tokens > self.max_tokens * 0.95:
-                    # emergency: cut middle messages that are still large (keep only 2 latest)
-                    # rebuild with 2 latest only
-                    system = self.messages[0]
-                    # take 2 latest besides system
-                    recent = self.messages[-2:]
-                    # summarize the remaining ones (between system and recent)
-                    middle = self.messages[1:-2]
-                    if middle:
-                        self._compaction_count += 1
-                        summary = f"[Emergency compaction #{self._compaction_count}: {len(middle)} messages truncated because still >95% limit]"
-                        self.messages = [system, {"role": "user", "content": summary}] + recent
-                        tokens = estimate_messages_tokens(self.messages)
+                    # emergency: keep fewer recent messages but still summarize middle with snippets
+                    # keep at least 4 or keep_recent//2, not just 2
+                    keep = max(4, self.keep_recent // 2)
+                    if len(self.messages) > keep + 1:
+                        system = self.messages[0]
+                        recent = self.messages[-keep:]
+                        middle = self.messages[1:-keep]
+                        if middle:
+                            # Create a summarized emergency compaction with snippets
+                            middle_tokens = estimate_messages_tokens(middle)
+                            self._compaction_count += 1
+                            summary_lines = [f"[Emergency compaction #{self._compaction_count}: {len(middle)} messages (~{middle_tokens} tokens) summarized]"]
+                            for m in middle[:8]:  # keep up to 8 snippets even in emergency
+                                role = m.get("role", "?")
+                                c = m.get("content", "")
+                                snippet = c[:300].replace("\n", " ").strip() if isinstance(c, str) else str(c)[:300]
+                                if isinstance(c, str) and len(c) > 300:
+                                    snippet += f" ...(+{len(c)-300})"
+                                if m.get("tool_calls"):
+                                    try:
+                                        tc_str = ", ".join([f"{tc['function']['name']}" for tc in m["tool_calls"]])
+                                    except:
+                                        tc_str = f"{len(m['tool_calls'])} tool_calls"
+                                    snippet += f" | {tc_str}"
+                                summary_lines.append(f"- {role}: {snippet}")
+                            if len(middle) > 8:
+                                summary_lines.append(f"...(+{len(middle)-8} more truncated)")
+                            summary = "\n".join(summary_lines)
+                            self.messages = [system, {"role": "user", "content": f"[EMERGENCY COMPACTED]\n{summary}"}] + recent
+                            tokens = estimate_messages_tokens(self.messages)
             attempts += 1
             if before == len(self.messages):
                 break
@@ -114,12 +131,25 @@ class ContextManager:
             return False  # nothing to compact
         # always keep system
         system = self.messages[0]
-        # keep recent N
-        recent = self.messages[-self.keep_recent:]
-        # middle to be summarized
-        middle = self.messages[1:-self.keep_recent]
+        # keep recent N, but ensure we don't orphan tool call pairs
+        # Check if the cut point splits a tool call sequence
+        recent_start = len(self.messages) - self.keep_recent
+        # If the message before recent is an assistant with tool_calls and recent starts with tool, keep the pair together
+        if recent_start > 1:
+            prev = self.messages[recent_start - 1]
+            first_recent = self.messages[recent_start]
+            # If previous is assistant with tool_calls and first recent is tool result, include previous in recent
+            if prev.get("role") == "assistant" and prev.get("tool_calls") and first_recent.get("role") == "tool":
+                recent = self.messages[recent_start - 1:]
+                middle = self.messages[1:recent_start - 1]
+            else:
+                recent = self.messages[-self.keep_recent:]
+                middle = self.messages[1:-self.keep_recent]
+        else:
+            recent = self.messages[-self.keep_recent:]
+            middle = self.messages[1:-self.keep_recent]
         if not middle:
-            return
+            return False
 
         # Create manual summary without LLM (to avoid deps & be fast)
         # Calculate stats

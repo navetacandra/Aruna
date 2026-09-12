@@ -28,9 +28,9 @@ class PermissionManager:
 
     def is_auto_allowed(self, tool_name: str) -> bool:
         """Check whether tool is auto-allowed without prompt based on mode."""
-        name = tool_name.strip()
-        # skill tools always auto (not dangerous, only reads .agent/skills)
-        if name in {"skill_list", "skill_load"}:
+        name = tool_name.strip().lower()
+        # skill and sub-agent tools always auto (not directly dangerous, sub-agents handle their own permissions)
+        if name in {"skill_list", "skill_load", "spawn_agents"}:
             return True
         if self.mode == "accept-all":
             return True

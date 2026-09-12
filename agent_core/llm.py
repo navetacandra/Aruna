@@ -221,6 +221,10 @@ class LLMClient:
                         decompressor = zlib.decompressobj(31)
                     except: decompressor = None
                 buffer = ""
+                current_event = ""
+                # Use incremental UTF-8 decoder to handle multi-byte boundaries
+                import codecs
+                decoder = codecs.getincrementaldecoder("utf-8")(errors="strict")
                 while True:
                     chunk = resp.read(4096)
                     if not chunk:
@@ -235,14 +239,20 @@ class LLMClient:
                                 continue
                         except:
                             pass
-                    buffer += chunk.decode("utf-8", errors="ignore")
+                    try:
+                        text = decoder.decode(chunk)
+                    except:
+                        text = chunk.decode("utf-8", errors="replace")
+                    buffer += text
                     lines = buffer.split("\n")
                     buffer = lines.pop()
 
                     for line in lines:
                         trimmed = line.strip()
-                        # Anthropic sometimes sends event: line, but for openai only data:
-                        if not trimmed or trimmed.startswith("event:"):
+                        if not trimmed:
+                            continue
+                        if trimmed.startswith("event:"):
+                            current_event = trimmed[len("event:"):].strip()
                             continue
                         if not trimmed.startswith("data:"):
                             continue
@@ -253,6 +263,9 @@ class LLMClient:
                             parsed = json.loads(data_str)
                         except json.JSONDecodeError:
                             continue
+                        # Use event header for Responses if no type in data
+                        if not parsed.get("type") and current_event:
+                            parsed["type"] = current_event
 
                         # Responses API delta - per SDK-example.md sec 2
                         handled = False
@@ -350,7 +363,15 @@ class LLMClient:
                                 if tc.get("function"):
                                     fn = tc["function"]
                                     if fn.get("name"):
-                                        tool_accum[idx]["name"] += fn["name"]
+                                        # Fix: don't concatenate duplicate full names (provider may send full name each delta)
+                                        if not tool_accum[idx]["name"]:
+                                            tool_accum[idx]["name"] = fn["name"]
+                                        elif fn["name"] != tool_accum[idx]["name"] and fn["name"] not in tool_accum[idx]["name"]:
+                                            # Only append if it's a true delta suffix
+                                            if fn["name"].startswith(tool_accum[idx]["name"]):
+                                                tool_accum[idx]["name"] = fn["name"]
+                                            else:
+                                                tool_accum[idx]["name"] += fn["name"]
                                     if fn.get("arguments"):
                                         arg_delta = fn["arguments"]
                                         tool_accum[idx]["arguments"] += arg_delta
@@ -386,7 +407,7 @@ class LLMClient:
             raise
         except Exception as e:
             if content_parts or tool_accum:
-                pass
+                print(f"[stream warning] {e} - returning partial content", file=sys.stderr)
             else:
                 raise
 
@@ -435,6 +456,8 @@ class LLMClient:
                         decompressor = zlib.decompressobj(31)
                     except: decompressor = None
                 buffer = ""
+                import codecs
+                decoder = codecs.getincrementaldecoder("utf-8")(errors="strict")
                 while True:
                     chunk = resp.read(4096)
                     if not chunk:
@@ -449,7 +472,11 @@ class LLMClient:
                                 continue
                         except:
                             pass
-                    buffer += chunk.decode("utf-8", errors="ignore")
+                    try:
+                        text = decoder.decode(chunk)
+                    except:
+                        text = chunk.decode("utf-8", errors="replace")
+                    buffer += text
                     lines = buffer.split("\n")
                     buffer = lines.pop()
 
@@ -560,7 +587,7 @@ class LLMClient:
             raise
         except Exception as e:
             if content_parts or tool_accum:
-                pass
+                print(f"[anthropic stream warning] {e} - returning partial", file=sys.stderr)
             else:
                 raise
 
