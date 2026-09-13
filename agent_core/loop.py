@@ -38,13 +38,36 @@ class AgentLoop:
         self.permission_manager = permission_manager
         self.extra_body = extra_body or {}
         self._tool_history: List[str] = []  # list of "fname:args_json" for stuck detection
+        self._read_cache: Dict[str, tuple] = {}  # validated cache: key -> (mtime, size, content)
         self._loaded_tools: set = set()
 
     def _select_tools_for_input(self, user_input: str) -> List[Dict[str, Any]]:
-        """Select tools - now loads all core tools by default to avoid hiding capabilities."""
-        # Always load core tools to avoid LLM blindness - lazy loading was hiding critical tools
-        # spawn_agents temporarily disabled
-        needed = {"read", "write", "edit", "glob", "grep", "bash", "skill_list", "skill_load"}
+        """Select only the required tools based on user prompt (lazy loading)."""
+        text = user_input.lower()
+        needed = set()
+        # Always provide skill discovery as lazy entry point
+        # But don't load all skill content, only via tool
+        # Heuristic based on keywords
+        if any(k in text for k in ["baca", "read", "lihat", "tampilkan", "file", "cat", "ls"]):
+            needed.update(["read", "glob"])
+        if any(k in text for k in ["tulis", "buat", "write", "simpan", "edit", "ubah", "ganti"]):
+            needed.update(["write", "edit", "read"])
+        if any(k in text for k in ["cari", "search", "grep", "temukan"]):
+            needed.update(["grep", "glob"])
+        if any(k in text for k in ["jalan", "exec", "bash", "command", "shell", "run", "eksekusi", "pwd", "ls", "python", "pip", "npm"]):
+            needed.update(["bash"])
+        if any(k in text for k in ["skill", "kemampuan", "lakukan"]):
+            needed.update(["skill_list", "skill_load"])
+        if any(k in text for k in ["parallel", "concurrent", "multiple", "sekaligus", "bersamaan", "spawn", "subagent", "sub-agent", "berbarengan", "simult"]):
+            needed.update(["spawn_agents"])
+        # If nothing matches, provide minimal discovery tools + read/bash as fallback
+        if not needed:
+            needed.update(["read", "bash", "skill_list"])
+        # Always include skill discovery if not already present
+        if "skill_list" not in needed and "skill" in text:
+            needed.add("skill_list")
+        # Always allow sub-agents on demand (for parallel tasks)
+        # They will be loaded via _ensure_tool_loaded if LLM requests them
         # Build list of defs that are only required
         defs = [self._all_tool_defs[n] for n in needed if n in self._all_tool_defs]
         # Track loaded
@@ -61,11 +84,64 @@ class AgentLoop:
                 self.tool_defs.append(self._all_tool_defs[fname])
                 self._log(f"[lazy] tool '{fname}' loaded on-demand")
 
-    # def _execute_spawn_agents(self, tasks: List[Dict[str, str]], parent_iteration: int) -> str:
-    #     """Execute multiple sub-agents concurrently. Each sub-agent gets its own context and loop."""
-    #     ...  # Disabled temporarily - sub-agents commented out
-    #     pass
-    # Disabled: spawn_agents temporarily commented
+    def _execute_spawn_agents(self, tasks: List[Dict[str, str]], parent_iteration: int) -> str:
+        """Execute multiple sub-agents concurrently. Each sub-agent gets its own context and loop."""
+        from .context import ContextManager
+        from .prompts import build_system_prompt
+        import uuid as _uuid
+
+        def run_single(task_info: Dict[str, str]) -> str:
+            label = task_info.get("label", "subagent")
+            task_prompt = task_info.get("task", "")
+            sub_session_id = f"{self.session_id}-sub-{_uuid.uuid4().hex[:8]}"
+            # Sub-agent gets a fresh context with explicit instruction not to spawn further
+            sub_system_prompt = self.context.system_prompt + "\n\n[SUB-AGENT MODE] You are a sub-agent. Do NOT use spawn_agents. Complete your single task directly using read, bash, glob, grep, etc. Be concise."
+            sub_ctx = ContextManager(system_prompt=sub_system_prompt, max_tokens=self.context.max_tokens, keep_recent=self.context.keep_recent)
+            # Sub-agent gets minimal context - only the task, not parent's spawn history
+            try:
+                sub_ctx.add_user(f"[Parent context] Main task was: {self.context.messages[0].get('content','')[:500] if self.context.messages else ''}")
+            except:
+                pass
+            # Sub-agent uses same LLM model but with reduced max_iterations and no spawn_agents to avoid recursion
+            sub_max_iter = max(5, min(12, self.max_iterations // 2 + 3))
+            # Filter out spawn_agents from sub-agent tools to prevent infinite recursion
+            sub_loop = AgentLoop(
+                llm=self.llm,
+                context=sub_ctx,
+                session_id=sub_session_id,
+                max_iterations=sub_max_iter,
+                verbose=False,  # quiet sub-agents, parent will log summary
+                permission_manager=self.permission_manager,
+                extra_body=dict(self.extra_body) if self.extra_body else {}
+            )
+            # Remove spawn_agents from sub-agent's available tools
+            if "spawn_agents" in sub_loop._all_tool_defs:
+                # Create filtered defs without spawn_agents for sub-agent
+                sub_loop._all_tool_defs = {k: v for k, v in sub_loop._all_tool_defs.items() if k != "spawn_agents"}
+            try:
+                result = sub_loop.run(task_prompt, stream=False)
+                return f"[{label}] Task: {task_prompt}\nResult: {result}\n[Sub-agent {label} finished in {sub_loop._tool_history.__len__()} tool calls]"
+            except Exception as e:
+                return f"[{label}] Task: {task_prompt}\nError: {e}"
+
+        # Run all sub-agents concurrently
+        start = time.time()
+        results: List[str] = []
+        with concurrent.futures.ThreadPoolExecutor(max_workers=len(tasks)) as executor:
+            future_to_task = {executor.submit(run_single, t): t for t in tasks}
+            for future in concurrent.futures.as_completed(future_to_task):
+                try:
+                    res = future.result(timeout=120)
+                    results.append(res)
+                except Exception as e:
+                    label = future_to_task[future].get("label", "unknown")
+                    results.append(f"[{label}] Error: {e}")
+
+        elapsed = time.time() - start
+        header = f"[spawn_agents] Completed {len(tasks)} sub-agents concurrently in {elapsed:.1f}s (parent iter {parent_iteration} still counts as 1)\n"
+        header += f"Sub-agents executed in parallel, saving ~{len(tasks)-1} iterations for main agent.\n"
+        header += "="*60 + "\n"
+        return header + "\n\n".join(results)
 
     def _log(self, s: str):
         if self.verbose:
@@ -257,14 +333,12 @@ class AgentLoop:
                         pat = parsed.get("pattern", "")
                         p = parsed.get("path", "")
                         self._log(f"<<< glob {pat} {p}".strip() if p else f"<<< glob {pat}".strip())
-                    # elif fname == "spawn_agents":
-                    #     tasks = parsed.get("tasks", [])
-                    #     labels = [t.get("label", f"agent-{i+1}") for i, t in enumerate(tasks) if isinstance(t, dict)]
-                    #     if not labels and isinstance(tasks, list):
-                    #         labels = [f"agent-{i+1}" for i in range(len(tasks))]
-                    #     self._log(f"<<< spawn_agents [{', '.join(labels)}] ({len(tasks)} concurrent)")
                     elif fname == "spawn_agents":
-                        self._log(f"<<< spawn_agents [disabled]")
+                        tasks = parsed.get("tasks", [])
+                        labels = [t.get("label", f"agent-{i+1}") for i, t in enumerate(tasks) if isinstance(t, dict)]
+                        if not labels and isinstance(tasks, list):
+                            labels = [f"agent-{i+1}" for i in range(len(tasks))]
+                        self._log(f"<<< spawn_agents [{', '.join(labels)}] ({len(tasks)} concurrent)")
                     else:
                         # fallback generic
                         if isinstance(fargs, str):
@@ -273,17 +347,55 @@ class AgentLoop:
                             args_str = json.dumps(fargs, ensure_ascii=False)
                         self._log(f"<<< {fname} {args_str}")
 
-                # Execute each tool sequentially (spawn_agents temporarily disabled)
+                # Execute each tool sequentially, but handle spawn_agents concurrently
                 for tc in tool_calls:
                     tid = tc.get("id", f"call_{iteration}")
                     fname = tc["function"]["name"]
                     fargs = tc["function"]["arguments"]
-                    # Disabled: spawn_agents temporarily commented
+                    # Special handling for spawn_agents - concurrent sub-agents
                     if fname == "spawn_agents":
-                        output = "Error: spawn_agents is temporarily disabled. Please handle tasks sequentially using read, glob, bash, etc."
-                        self.context.add_tool_result(tid, fname, output)
-                        save_message(self.session_id, {"role": "tool", "tool_call_id": tid, "name": fname, "content": output})
-                        self._log(f"[spawn_agents disabled] {output}")
+                        try:
+                            parsed = json.loads(fargs) if isinstance(fargs, str) else fargs
+                            tasks = parsed.get("tasks", []) if isinstance(parsed, dict) else []
+                            # Handle case where tasks is a JSON string (LLM sometimes sends string instead of array)
+                            if isinstance(tasks, str):
+                                try:
+                                    tasks = json.loads(tasks)
+                                except:
+                                    tasks = [{"task": tasks}]
+                            # Normalize tasks - handle both string and object formats
+                            normalized = []
+                            for t in tasks:
+                                if isinstance(t, str):
+                                    if len(t.strip()) < 3:
+                                        continue
+                                    normalized.append({"task": t, "label": f"agent-{len(normalized)+1}"})
+                                elif isinstance(t, dict) and "task" in t:
+                                    task_str = t["task"]
+                                    if isinstance(task_str, str) and len(task_str.strip()) < 3:
+                                        continue
+                                    normalized.append({"task": task_str, "label": t.get("label", f"agent-{len(normalized)+1}")})
+                            if not normalized:
+                                output = "Error: spawn_agents requires 'tasks' array with at least one {task: string}"
+                                self.context.add_tool_result(tid, fname, output)
+                                save_message(self.session_id, {"role": "tool", "tool_call_id": tid, "name": fname, "content": output})
+                                self._log(f"[Iter {iteration}/{self.max_iterations}]\n")
+                                continue
+                            # Limit concurrent sub-agents to avoid explosion
+                            if len(normalized) > 5:
+                                normalized = normalized[:5]
+                                self._log(f"[spawn_agents] limited to 5 concurrent sub-agents (was {len(tasks)})")
+                            self._log(f"[spawn_agents] spawning {len(normalized)} sub-agents concurrently...")
+                            output = self._execute_spawn_agents(normalized, iteration)
+                            self.context.add_tool_result(tid, fname, output)
+                            save_message(self.session_id, {"role": "tool", "tool_call_id": tid, "name": fname, "content": output})
+                            # Show preview
+                            preview = output[:2000] + ("...[truncated]" if len(output) > 2000 else "")
+                            self._log(f"[spawn_agents output]\n{preview}")
+                        except Exception as e:
+                            output = f"Error in spawn_agents: {e}"
+                            self.context.add_tool_result(tid, fname, output)
+                            save_message(self.session_id, {"role": "tool", "tool_call_id": tid, "name": fname, "content": output})
                         # Track history
                         try:
                             parsed_args = json.loads(fargs) if isinstance(fargs, str) else fargs
@@ -305,7 +417,7 @@ class AgentLoop:
                         fp = parsed.get("filePath") or parsed.get("filepath") or parsed.get("file_path") or parsed.get("path") or ""
                         self._log(f"<<< {fname} {fp}".strip())
 
-                    # Track history for stuck detection (no cache)
+                    # Track history for stuck detection
                     try:
                         parsed_args = json.loads(fargs) if isinstance(fargs, str) else fargs
                         cache_key = f"{fname}:{json.dumps(parsed_args, sort_keys=True, ensure_ascii=False)}"
@@ -314,6 +426,31 @@ class AgentLoop:
                     self._tool_history.append(cache_key)
                     if len(self._tool_history) > 20:
                         self._tool_history = self._tool_history[-20:]
+                    # Validated read cache: if same file read before and file hasn't changed, reuse
+                    if fname == "read":
+                        try:
+                            fp = parsed_args.get("filePath") or parsed_args.get("filepath") or parsed_args.get("file_path") or parsed_args.get("path") or ""
+                            if fp:
+                                import pathlib as _pl
+                                p = _pl.Path(fp)
+                                if p.exists() and fp in self._read_cache:
+                                    cached_mtime, cached_size, cached_content = self._read_cache[fp]
+                                    cur_mtime = p.stat().st_mtime
+                                    cur_size = p.stat().st_size
+                                    # Validate: same mtime and size means file unchanged
+                                    if cur_mtime == cached_mtime and cur_size == cached_size:
+                                        # Check if same offset/limit (via cache_key)
+                                        if cache_key in self._read_cache:
+                                            _, _, cached_exact = self._read_cache[cache_key]
+                                            output = cached_exact + "\n\n[NOTE: File already read and unchanged. Reusing previous result. Use grep for specific sections if needed.]"
+                                        else:
+                                            output = cached_content + "\n\n[NOTE: File already read and unchanged. Reusing previous result. Use grep for specific sections if needed.]"
+                                        self.context.add_tool_result(tid, fname, output)
+                                        save_message(self.session_id, {"role": "tool", "tool_call_id": tid, "name": fname, "content": output})
+                                        self._log(f"[read cache validated] {fp} unchanged, reusing")
+                                        continue
+                        except Exception:
+                            pass
                     # Permission gate for hardware tools
                     if self.permission_manager is not None:
                         try:
@@ -331,6 +468,20 @@ class AgentLoop:
                     # Show bash output directly
                     if fname == "bash":
                         self._log(f"[bash output]\n{output}")
+                    # Cache read results with validation (mtime, size)
+                    if fname == "read" and "Error:" not in output[:20]:
+                        try:
+                            fp = parsed_args.get("filePath") or parsed_args.get("filepath") or parsed_args.get("file_path") or parsed_args.get("path") or ""
+                            if fp:
+                                import pathlib as _pl
+                                p = _pl.Path(fp)
+                                if p.exists():
+                                    mtime = p.stat().st_mtime
+                                    size = p.stat().st_size
+                                    self._read_cache[fp] = (mtime, size, output)
+                                    self._read_cache[cache_key] = (mtime, size, output)
+                        except:
+                            pass
                     self.context.add_tool_result(tid, fname, output)
                     save_message(self.session_id, {"role": "tool", "tool_call_id": tid, "name": fname, "content": output})
 

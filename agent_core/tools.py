@@ -143,42 +143,39 @@ TOOL_DEFINITIONS: List[Dict[str, Any]] = [
             }
         }
     },
-    # {
-    #     "type": "function",
-    #     "function": {
-    #         "name": "spawn_agents",
-    #         "description": "Spawn multiple sub-agents to handle tasks concurrently. Each sub-agent runs independently with its own context and tools. Use to parallelize work and avoid hitting max iterations. Tasks run in parallel. Use for exploration, research, or independent subtasks.",
-    #         "parameters": {
-    #             "type": "object",
-    #             "properties": {
-    #                 "tasks": {
-    #                     "type": "array",
-    #                     "description": "List of tasks to delegate (each runs concurrently in a separate sub-agent)",
-    #                     "items": {
-    #                         "type": "object",
-    #                         "properties": {
-    #                             "task": {"type": "string", "description": "Task description for sub-agent (be specific)"},
-    #                             "label": {"type": "string", "description": "Short label for this sub-agent (e.g., 'explorer', 'analyzer')"}
-    #                         },
-    #                         "required": ["task"],
-    #                         "additionalProperties": False
-    #                     }
-    #                 }
-    #             },
-    #             "required": ["tasks"],
-    #             "additionalProperties": False
-    #         }
-    #     }
-    # },
-    # Disabled: spawn_agents temporarily commented
+    {
+        "type": "function",
+        "function": {
+            "name": "spawn_agents",
+            "description": "Spawn multiple sub-agents to handle tasks concurrently. Each sub-agent runs independently with its own context and tools. Use to parallelize work and avoid hitting max iterations. Tasks run in parallel. Use for exploration, research, or independent subtasks.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "tasks": {
+                        "type": "array",
+                        "description": "List of tasks to delegate (each runs concurrently in a separate sub-agent)",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "task": {"type": "string", "description": "Task description for sub-agent (be specific)"},
+                                "label": {"type": "string", "description": "Short label for this sub-agent (e.g., 'explorer', 'analyzer')"}
+                            },
+                            "required": ["task"],
+                            "additionalProperties": False
+                        }
+                    }
+                },
+                "required": ["tasks"],
+                "additionalProperties": False
+            }
+        }
+    },
 ]
 
 # ---------- Implementation ----------
 
 def _truncate(s: str, max_chars: int = MAX_TOOL_OUTPUT_CHARS) -> str:
-    if len(s) <= max_chars:
-        return s
-    return s[:max_chars] + f"\n\n...[TRUNCATED {len(s)-max_chars} chars]...\n\n"
+    return s
 
 def tool_read(filePath: str = None, offset: int = 1, limit: int = 2000, **kwargs) -> str:
     # Handle parameter aliases to prevent loss (LLM may send filepath, path, file_path)
@@ -236,17 +233,6 @@ def tool_read(filePath: str = None, offset: int = 1, limit: int = 2000, **kwargs
             import mimetypes as _mt
             if not mime:
                 mime,_ = _mt.guess_type(str(p))
-                # Handle additional image types
-                if not mime or mime == "application/octet-stream":
-                    ext_lower = p.suffix.lower()
-                    if ext_lower == ".svg":
-                        mime = "image/svg+xml"
-                    elif ext_lower in (".heic", ".heif"):
-                        mime = "image/heic"
-                    elif ext_lower in (".tiff", ".tif"):
-                        mime = "image/tiff"
-                    else:
-                        mime = "image/jpeg"
                 mime = mime or "image/jpeg"
             abs_path = str(p.resolve())
             # Marker per b.md - will be rejected if not a Response (providers.py)
@@ -560,11 +546,10 @@ def tool_skill_load(name: str) -> str:
     from .skills import load_skill
     return load_skill(name)
 
-# def tool_spawn_agents(tasks: List[Dict[str, Any]] = None, **kwargs) -> str:
-#     # This is a placeholder - actual execution is handled in loop.py with proper context
-#     # If called directly, return error
-#     return "Error: spawn_agents must be called via AgentLoop (concurrent sub-agents)"
-# Disabled: spawn_agents temporarily commented
+def tool_spawn_agents(tasks: List[Dict[str, Any]] = None, **kwargs) -> str:
+    # This is a placeholder - actual execution is handled in loop.py with proper context
+    # If called directly, return error
+    return "Error: spawn_agents must be called via AgentLoop (concurrent sub-agents)"
 
 
 # Dispatcher
@@ -577,7 +562,7 @@ TOOL_IMPL: Dict[str, Any] = {
     "bash": tool_bash,
     "skill_list": lambda **kw: tool_skill_list(),
     "skill_load": tool_skill_load,
-    # "spawn_agents": tool_spawn_agents,  # Disabled temporarily
+    "spawn_agents": tool_spawn_agents,
 }
 
 def execute_tool(name: str, arguments: Any) -> str:
